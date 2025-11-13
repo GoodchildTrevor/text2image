@@ -36,6 +36,7 @@ def get_pipeline(model_name: str = "FLUX.1-schnell") -> FluxPipeline:
 
     try:
         load_start = time.perf_counter()
+        logger.info(f"✅ Model '{model_name}' start loading")
         pipe = FluxPipeline.from_pretrained(
             model_id,
             torch_dtype=torch.float16,
