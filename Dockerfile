@@ -2,9 +2,9 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-RUN pip install uv
+RUN pip install --no-cache-dir uv
 
-RUN uv pip install --no-cache-dir \
+RUN uv pip install --system --no-cache-dir \
     --index-url https://download.pytorch.org/whl/cu128 \
     --trusted-host download.pytorch.org \
     torch==2.9.0+cu128 \
@@ -12,7 +12,7 @@ RUN uv pip install --no-cache-dir \
     xformers==0.0.33
 
 COPY requirements.txt .
-RUN uv pip install --no-cache-dir -r requirements.txt 
+RUN uv pip install --system --no-cache-dir -r requirements.txt 
 
 COPY . .
 
