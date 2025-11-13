@@ -84,6 +84,7 @@ async def generate_image(request: TextToImageRequest) -> Response:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         start_time = time.perf_counter()
+        logger.info(f"Prompt {request.prompt}")
 
         with torch.no_grad():
             output = pipe(
