@@ -39,11 +39,14 @@ def get_pipeline(model_name: str = "FLUX.1-schnell") -> FluxPipeline:
         logger.info(f"✅ Model '{model_name}' start loading")
         pipe = FluxPipeline.from_pretrained(
             model_id,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
             use_safetensors=True,
-            device_map="balanced",
+            device_map="auto",
+            low_cpu_mem_usage=True, 
         )
         pipe.enable_vae_slicing()
+        pipe.enable_vae_tiling() 
+        pipe.enable_attention_slicing(1) 
         load_time = time.perf_counter() - load_start
         logger.info(f"✅ Model '{model_name}' loaded in {load_time:.2f} sec")
         return pipe
