@@ -2,8 +2,6 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-COPY resources/pip.conf /etc/pip.conf
-
 COPY image_gen/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt 
 
