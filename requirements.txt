@@ -13,9 +13,6 @@ python-multipart==0.0.2
 safetensors==0.6.2
 sentencepiece==0.2.1
 tokenizers==0.22.1
-torch==2.10.0.dev20251103+cu128
-torchvision==0.25.0.dev20251031+cu128
 tqdm==4.67.1
 transformers==4.57.1
 uvicorn==0.33.0
-xformers==0.0.33.dev20251103+cu128
