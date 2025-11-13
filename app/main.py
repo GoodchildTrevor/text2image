@@ -41,7 +41,7 @@ def get_pipeline(model_name: str = "FLUX.1-schnell") -> FluxPipeline:
             model_id,
             torch_dtype=torch.bfloat16,
             use_safetensors=True,
-            device_map="auto",
+            device_map="balanced",
             low_cpu_mem_usage=True, 
         )
         pipe.enable_vae_slicing()
