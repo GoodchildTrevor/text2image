@@ -1,0 +1,16 @@
+services:
+  imgen:
+    container_name: text2image
+    runtime: nvidia
+    ports:
+      - "8010:8010"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - HF_HOME=/root/.cache/huggingface
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - hf_cache:/root/.cache/huggingface 
+
+volumes:
+  hf_cache:
+  
