@@ -1,6 +1,7 @@
 services:
   imgen:
     container_name: text2image
+    build: .
     runtime: nvidia
     ports:
       - "8010:8010"
