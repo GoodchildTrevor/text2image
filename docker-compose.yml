@@ -2,6 +2,7 @@ services:
   imgen:
     container_name: text2image
     build: .
+    restart: unless-stopped
     runtime: nvidia
     ports:
       - "8010:8010"
@@ -11,6 +12,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
       - hf_cache:/root/.cache/huggingface 
+    
 
 volumes:
   hf_cache:
