@@ -13,7 +13,7 @@ from app.config import TextToImageRequest
 os.environ["TORCHDYNAMO_DISABLE"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-LOG_PATH = "summarizer.log"
+LOG_PATH = "text2image.log"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
