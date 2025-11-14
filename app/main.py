@@ -89,6 +89,7 @@ async def generate_image(request: TextToImageRequest) -> Response:
         with torch.no_grad():
             output = pipe(
                 prompt=request.prompt,
+                negative_prompt="low quality, blurry, distorted face, extra limbs, long fingers, extra fingers, watermark",
                 height=request.height,
                 width=request.width,
                 num_inference_steps=request.num_inference_steps,
