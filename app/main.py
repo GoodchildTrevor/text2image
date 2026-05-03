@@ -1,6 +1,7 @@
 import os, torch, logging
 from fastapi import FastAPI
-from app.routers import direct_image, openai_compat
+from app.routers.direct_image  import router as direct_router
+from app.routers.openai_compat import router as openai_router
 
 os.environ["TORCHDYNAMO_DISABLE"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -16,8 +17,8 @@ logging.basicConfig(
 
 app = FastAPI(title="FLUX.1-schnell Text-to-Image API")
 
-app.include_router(direct_image.router)
-app.include_router(openai_compat.router)
+app.include_router(direct_router)    # POST /generate
+app.include_router(openai_router)    # POST /v1/images/generations
 
 @app.get("/health")
 def health_check():

@@ -10,10 +10,11 @@ services:
       - HF_TOKEN=${HF_TOKEN}
       - HF_HOME=/root/.cache/huggingface
       - NVIDIA_VISIBLE_DEVICES=all
+      - FLUX_DEFAULT_STEPS=4
+      - FLUX_DEFAULT_GUIDANCE=1.0
     volumes:
       - hf_cache:/root/.cache/huggingface 
     
 
 volumes:
-  hf_cache:
-  
+  hf_cache: 
