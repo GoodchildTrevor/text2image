@@ -1,6 +1,9 @@
-import os, torch, logging
+import os
+import torch
+import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from app.routers.direct_image  import router as direct_router
+from app.routers.direct_image import router as direct_router
 from app.routers.openai_compat import router as openai_router
 
 os.environ["TORCHDYNAMO_DISABLE"] = "1"
@@ -15,10 +18,21 @@ logging.basicConfig(
     ]
 )
 
-app = FastAPI(title="FLUX.1-schnell Text-to-Image API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Optional model warmup on startup. Enable via PRELOAD_MODEL=1."""
+    if os.getenv("PRELOAD_MODEL", "0") == "1":
+        from app.service import get_pipeline
+        get_pipeline()
+    yield
+
+
+app = FastAPI(title="FLUX.1-schnell Text-to-Image API", lifespan=lifespan)
 
 app.include_router(direct_router)    # POST /generate
 app.include_router(openai_router)    # POST /v1/images/generations
+
 
 @app.get("/health")
 def health_check():

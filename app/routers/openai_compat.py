@@ -1,10 +1,11 @@
-# app/routers/openai_compat.py
-import base64, time
+import base64
+import time
+import logging
+import os
 from fastapi import APIRouter, HTTPException
 from io import BytesIO
 from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject
 from app.service import run_inference
-import logging, os
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1")
@@ -13,6 +14,7 @@ VALID_SIZES = {"256x256", "512x512", "1024x1024"}
 
 DEFAULT_STEPS = int(os.getenv("FLUX_DEFAULT_STEPS", "4"))
 DEFAULT_GUIDANCE = float(os.getenv("FLUX_DEFAULT_GUIDANCE", "1.0"))
+
 
 @router.post("/images/generations", response_model=ImageGenerationResponse)
 async def openai_generate(request: ImageGenerationRequest) -> ImageGenerationResponse:
@@ -28,7 +30,7 @@ async def openai_generate(request: ImageGenerationRequest) -> ImageGenerationRes
     w, h = map(int, request.size.split("x"))
 
     try:
-        image, _ = run_inference(
+        image, _ = await run_inference(
             prompt=request.prompt,
             width=w,
             height=h,
@@ -47,9 +49,10 @@ async def openai_generate(request: ImageGenerationRequest) -> ImageGenerationRes
         logger.error(f"OpenAI-compat generation error: {e}")
         raise HTTPException(500, f"Image generation failed: {e}")
 
+
 @router.get("/models")
 def list_models():
     return {"object": "list", "data": [
         {"id": "flux-schnell", "object": "model",
-         "created": 1700000000, "owned_by": "local"}
+         "created": int(time.time()), "owned_by": "local"}
     ]}
