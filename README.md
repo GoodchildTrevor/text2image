@@ -1,49 +1,49 @@
-# text2image
+# imgen
 
-A self-hosted **text-to-image REST API** powered by [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) from Black Forest Labs. Built with FastAPI and packaged as a Docker container with full NVIDIA GPU support.
+A self-hosted **image generation API** with an OpenAI-compatible interface. Routes requests to a local [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) diffusion pipeline or to cloud models via [RouterAI](https://routerai.ru) — all controlled through environment variables, no code changes needed.
 
-***
+Built with FastAPI. Packaged as a Docker container with NVIDIA GPU support.
+
+---
 
 ## Features
 
-- **Two API modes** — a simple direct endpoint and a drop-in **OpenAI-compatible** endpoint (`/v1/images/generations`)
-- **FLUX.1-schnell** model — fast, high-quality image generation via `diffusers`
-- **Memory-efficient** — uses VAE slicing, tiling, and attention slicing; serializes requests via async lock to prevent CUDA conflicts
-- **Lazy model loading** — model is loaded on first request (or eagerly via `PRELOAD_MODEL=1`)
-- **Persistent model cache** — Hugging Face cache is mounted as a Docker volume, so the model is not re-downloaded on container restart
+- **OpenAI-compatible API** — drop-in replacement for `openai.images.generate` and `openai.images.edit`
+- **Multi-provider routing** — local FLUX pipeline or cloud models (Gemini, GPT image, etc.) selected per-request by `model` field
+- **Zero hardcode** — all model names, sizes, and inference defaults are configured via env vars
+- **Memory-efficient local inference** — VAE slicing/tiling, attention slicing, async lock to prevent concurrent CUDA errors
+- **Lazy or eager model loading** — loads on first request, or at startup with `PRELOAD_MODEL=true`
+- **Persistent model cache** — HuggingFace cache mounted as Docker volume, no re-downloads on restart
+- **Image editing** — `POST /v1/images/edits` for image-to-image via cloud providers
 - **Health endpoint** — reports CUDA availability and GPU count
 
-***
+---
 
 ## Requirements
 
 - Docker + Docker Compose
 - NVIDIA GPU with CUDA 12.8 support
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-- Hugging Face account with access to `black-forest-labs/FLUX.1-schnell`
+- HuggingFace account with access to `black-forest-labs/FLUX.1-schnell` *(local mode only)*
 
-***
+---
 
 ## Quick Start
 
 **1. Clone the repository:**
 
 ```bash
-git clone https://github.com/GoodchildTrevor/text2image.git
-cd text2image
+git clone https://github.com/GoodchildTrevor/imgen.git
+cd imgen
 ```
 
-**2. Set your Hugging Face token:**
+**2. Create your `.env` file:**
 
 ```bash
-export HF_TOKEN=hf_your_token_here
+cp .env.example .env
 ```
 
-Or create a `.env` file:
-
-```env
-HF_TOKEN=hf_your_token_here
-```
+Edit `.env` — at minimum set `HF_TOKEN` for local mode, or `API_KEY` + `CLOUD_MODELS` for cloud mode.
 
 **3. Build and run:**
 
@@ -53,13 +53,57 @@ docker compose up --build
 
 The API will be available at `http://localhost:8010`.
 
-***
+---
+
+## Configuration
+
+All configuration is done via environment variables. See [`.env.example`](.env.example) for the full list with descriptions.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HF_TOKEN` | — | HuggingFace token for downloading gated models (local mode) |
+| `LOCAL_MODEL` | `black-forest-labs/FLUX.1-schnell` | HuggingFace model ID for the local diffusion pipeline |
+| `LOCAL_MODELS` | value of `LOCAL_MODEL` | Comma-separated short names that route to the local pipeline |
+| `API_KEY` | — | RouterAI API key — enables cloud model routing |
+| `CLOUD_MODELS` | — | Comma-separated cloud model IDs routed through RouterAI |
+| `FLUX_DEFAULT_STEPS` | `4` | Default denoising steps for local inference |
+| `FLUX_DEFAULT_GUIDANCE` | `1.0` | Default guidance scale for local inference |
+| `VALID_SIZES` | `1024x1024,864x1184,...` | Comma-separated allowed output sizes (`WxH`) |
+| `PRELOAD_MODEL` | `false` | Set to `true` to load the local model at container startup |
+| `NVIDIA_VISIBLE_DEVICES` | `all` | Which GPUs to expose to the container |
+
+### Example: local-only setup
+
+```env
+HF_TOKEN=hf_your_token_here
+LOCAL_MODEL=black-forest-labs/FLUX.1-schnell
+LOCAL_MODELS=flux-schnell
+```
+
+### Example: cloud-only setup
+
+```env
+API_KEY=your_routerai_key
+CLOUD_MODELS=google/gemini-3.1-flash-image-preview,openai/gpt-5-image
+```
+
+### Example: mixed setup
+
+```env
+HF_TOKEN=hf_your_token_here
+LOCAL_MODEL=black-forest-labs/FLUX.1-schnell
+LOCAL_MODELS=flux-schnell
+API_KEY=your_routerai_key
+CLOUD_MODELS=google/gemini-3.1-flash-image-preview,openai/gpt-5-image
+```
+
+---
 
 ## API Reference
 
 ### `GET /health`
 
-Returns the service status and CUDA device info.
+Returns service status and CUDA device info.
 
 ```json
 {
@@ -69,118 +113,137 @@ Returns the service status and CUDA device info.
 }
 ```
 
-***
+---
 
 ### `POST /generate`
 
 Generate an image and receive it as a raw PNG binary.
 
-**Request body:**
-
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `prompt` | `string` | required | Text description of the image |
-| `width` | `int` | `512` | Image width in pixels (256–1024, divisible by 8) |
-| `height` | `int` | `512` | Image height in pixels (256–1024, divisible by 8) |
-| `num_inference_steps` | `int` | `5` | Denoising steps (1–50) |
+| `model` | `string` | `LOCAL_MODEL` env | Model name to use |
+| `width` | `int` | `512` | Image width in pixels |
+| `height` | `int` | `512` | Image height in pixels |
+| `num_inference_steps` | `int` | `5` | Denoising steps |
 | `guidance_scale` | `float` | `1.0` | CFG guidance scale |
-
-**Example:**
 
 ```bash
 curl -X POST http://localhost:8010/generate \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "a cat sitting on a neon-lit rooftop, cyberpunk style", "width": 512, "height": 512}' \
+  -d '{"prompt": "a cat on a neon-lit rooftop, cyberpunk style", "width": 1024, "height": 1024}' \
   --output result.png
 ```
 
-***
+---
 
 ### `POST /v1/images/generations`
 
-OpenAI-compatible endpoint. Drop-in replacement for `openai.images.generate`.
-
-**Request body:**
+OpenAI-compatible image generation. Drop-in replacement for `openai.images.generate`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `prompt` | `string` | required | Text description of the image |
-| `model` | `string` | `"flux-schnell"` | Model name (informational) |
+| `model` | `string` | `LOCAL_MODEL` env | Model name — routes to local or cloud provider |
 | `n` | `int` | `1` | Number of images (only `1` supported) |
-| `size` | `string` | `"512x512"` | One of `256x256`, `512x512`, `1024x1024` |
-| `response_format` | `string` | `"b64_json"` | Only `b64_json` is supported |
-
-**Example (Python with OpenAI SDK):**
+| `size` | `string` | `1024x1024` | Output size — must be in `VALID_SIZES` |
+| `response_format` | `string` | `b64_json` | Only `b64_json` supported |
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    api_key="not-needed",
-    base_url="http://localhost:8010/v1"
-)
+client = OpenAI(api_key="not-needed", base_url="http://localhost:8010/v1")
 
+# Local model
 response = client.images.generate(
     model="flux-schnell",
     prompt="a futuristic city at sunset, watercolor style",
-    size="512x512",
+    size="1024x1024",
+)
+
+# Cloud model
+response = client.images.generate(
+    model="google/gemini-3.1-flash-image-preview",
+    prompt="a futuristic city at sunset, watercolor style",
+    size="1024x1024",
 )
 
 import base64
-image_data = base64.b64decode(response.data[0].b64_json)
 with open("output.png", "wb") as f:
-    f.write(image_data)
+    f.write(base64.b64decode(response.data[0].b64_json))
 ```
 
-***
+---
+
+### `POST /v1/images/edits`
+
+OpenAI-compatible image editing. Requires a cloud model — local pipeline does not support editing.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `prompt` | `string` | required | Text description of the desired edit |
+| `model` | `string` | `CLOUD_MODEL` env | Must be a registered cloud model |
+| `image` | `string` | required | Base64-encoded input image |
+| `n` | `int` | `1` | Number of images (only `1` supported) |
+| `size` | `string` | `1024x1024` | Output size — must be in `VALID_SIZES` |
+
+```python
+import base64
+from openai import OpenAI
+
+client = OpenAI(api_key="not-needed", base_url="http://localhost:8010/v1")
+
+with open("input.png", "rb") as f:
+    image_b64 = base64.b64encode(f.read()).decode()
+
+response = client.images.edit(
+    model="google/gemini-3.1-flash-image-preview",
+    image=image_b64,
+    prompt="make it look like a painting",
+)
+
+with open("edited.png", "wb") as f:
+    f.write(base64.b64decode(response.data[0].b64_json))
+```
+
+---
 
 ### `GET /v1/models`
 
-Returns the list of available models.
+Returns the list of all registered models (local + cloud).
 
-***
-
-## Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `HF_TOKEN` | — | **Required.** Hugging Face API token for downloading gated model |
-| `HF_HOME` | `/root/.cache/huggingface` | Path for Hugging Face model cache |
-| `FLUX_DEFAULT_STEPS` | `4` | Default inference steps for the OpenAI-compat endpoint |
-| `FLUX_DEFAULT_GUIDANCE` | `1.0` | Default guidance scale for the OpenAI-compat endpoint |
-| `PRELOAD_MODEL` | `0` | Set to `1` to load the model at startup instead of on first request |
-| `NVIDIA_VISIBLE_DEVICES` | `all` | Which GPUs to expose to the container |
-
-***
+---
 
 ## Project Structure
 
 ```
-text2image/
+imgen/
 ├── app/
 │   ├── main.py            # FastAPI app, lifespan, router registration
 │   ├── config.py          # Pydantic request/response models
-│   ├── service.py         # Model loading (lru_cache) and inference logic
+│   ├── providers.py       # Provider registry — local pipeline and RouterAI cloud
+│   ├── service.py         # Inference logic and provider routing
 │   └── routers/
 │       ├── direct_image.py   # POST /generate → raw PNG
-│       └── openai_compat.py  # POST /v1/images/generations (OpenAI-compatible)
+│       └── openai_compat.py  # POST /v1/images/generations and /v1/images/edits
+├── .env.example
 ├── Dockerfile
 ├── docker-compose.yml
-├── entrypoint.sh          # HF login + app startup
+├── entrypoint.sh
 └── requirements.txt
 ```
 
-***
+---
 
 ## Notes
 
-- Inference requests are **serialized** with an `asyncio.Lock` to avoid concurrent CUDA memory errors.
-- The model is cached with `lru_cache(maxsize=1)` — it loads once and stays in GPU memory.
-- `TORCHDYNAMO_DISABLE=1` and `expandable_segments:True` are set to improve stability and VRAM efficiency.
-- Logs are written to both stdout and `text2image.log`.
+- Inference requests are **serialized** via `asyncio.Lock` to prevent concurrent CUDA memory errors.
+- The local pipeline is cached with `lru_cache(maxsize=1)` — loaded once, stays in GPU memory.
+- `TORCHDYNAMO_DISABLE=1` and `expandable_segments:True` are set in the container for VRAM stability.
+- Logs go to stdout and `imgen.log`.
 
-***
+---
 
 ## License
 
-This project does not include an explicit license. The FLUX.1-schnell model is subject to its own [license on Hugging Face](https://huggingface.co/black-forest-labs/FLUX.1-schnell).
+No explicit license. The FLUX.1-schnell model is subject to its own [license on HuggingFace](https://huggingface.co/black-forest-labs/FLUX.1-schnell).
