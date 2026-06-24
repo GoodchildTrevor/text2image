@@ -3,8 +3,14 @@ import time
 import logging
 import os
 from fastapi import APIRouter, HTTPException
+<<<<<<< HEAD
 from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject, ImageEditRequest
 from app.service import generate_image, edit_image
+=======
+from io import BytesIO
+from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject
+from app.service import run_inference
+>>>>>>> 6e298f99077d321e30a27d9fd2c4084df75c6129
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1")
@@ -12,6 +18,7 @@ router = APIRouter(prefix="/v1")
 DEFAULT_STEPS = int(os.getenv("FLUX_DEFAULT_STEPS", "4"))
 DEFAULT_GUIDANCE = float(os.getenv("FLUX_DEFAULT_GUIDANCE", "1.0"))
 VALID_SIZES = {"864x1184", "1184x864", "768x1344", "1344x768", "1024x1024"}
+
 
 
 @router.post("/images/generations", response_model=ImageGenerationResponse)
@@ -45,8 +52,12 @@ async def openai_generate(request: ImageGenerationRequest):
     w, h = map(int, request.size.split("x"))
 
     try:
+<<<<<<< HEAD
         img_bytes, revised_prompt = await generate_image(
             model=request.model,
+=======
+        image, _ = await run_inference(
+>>>>>>> 6e298f99077d321e30a27d9fd2c4084df75c6129
             prompt=request.prompt,
             width=w,
             height=h,
@@ -66,6 +77,7 @@ async def openai_generate(request: ImageGenerationRequest):
         raise HTTPException(500, "Image generation failed")
 
 
+<<<<<<< HEAD
 @router.post("/images/edits", response_model=ImageGenerationResponse)
 async def openai_edit(request: ImageEditRequest):
     """Edit an existing image based on a text prompt via OpenAI-compatible API.
@@ -104,3 +116,11 @@ async def openai_edit(request: ImageEditRequest):
     except Exception as e:
         logger.error(f"Edit error: {e}")
         raise HTTPException(500, "Image edit failed")
+=======
+@router.get("/models")
+def list_models():
+    return {"object": "list", "data": [
+        {"id": "flux-schnell", "object": "model",
+         "created": int(time.time()), "owned_by": "local"}
+    ]}
+>>>>>>> 6e298f99077d321e30a27d9fd2c4084df75c6129
