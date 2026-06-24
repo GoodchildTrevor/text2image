@@ -1,7 +1,7 @@
 import os
 import base64
 import httpx
-from typing import Dict, Optional, Tuple
+from typing import Optional
 import json
 import re
 import logging
@@ -24,7 +24,7 @@ class BaseProvider:
         height: int,
         steps: int = None,
         guidance: float = None,
-    ) -> Tuple[bytes, str]:
+    ) -> tuple[bytes, str]:
         """Generate an image from a text prompt.
 
         :param model: The model identifier to use for generation.

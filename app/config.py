@@ -1,10 +1,11 @@
 from pydantic import BaseModel
-from typing import Optional, List
+import os
+from typing import Optional
 
 
 class TextToImageRequest(BaseModel):
     """Request model for text-to-image generation."""
-    model: Optional[str] = "flux-schnell"
+    model: Optional[str] = os.getenv("LOCAL_MODEL")
     prompt: str
     height: Optional[int] = 512
     width: Optional[int] = 512
@@ -14,7 +15,7 @@ class TextToImageRequest(BaseModel):
 
 class ImageEditRequest(BaseModel):
     prompt: str
-    model: Optional[str] = "google/gemini-3.1-flash-image-preview"
+    model: Optional[str] = os.getenv("CLOUD_MODEL")
     image: str
     n: Optional[int] = 1
     size: Optional[str] = "1024x1024"
@@ -23,7 +24,7 @@ class ImageEditRequest(BaseModel):
 
 class ImageGenerationRequest(BaseModel):
     prompt: str
-    model: Optional[str] = "flux-schnell"
+    model: Optional[str] = os.getenv("LOCAL_MODEL")
     n: Optional[int] = 1
     size: Optional[str] = "1024x1024"
     response_format: Optional[str] = "b64_json"
@@ -40,4 +41,4 @@ class ImageObject(BaseModel):
 
 class ImageGenerationResponse(BaseModel):
     created: int
-    data: List[ImageObject]
+    data: list[ImageObject]
