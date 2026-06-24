@@ -1,21 +1,38 @@
-# app/routers/openai_compat.py
-import base64, time
+import base64
+import time
+import logging
+import os
 from fastapi import APIRouter, HTTPException
-from io import BytesIO
-from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject
-from app.service import run_inference
-import logging, os
+from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject, ImageEditRequest
+from app.service import generate_image, edit_image
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1")
 
-VALID_SIZES = {"256x256", "512x512", "1024x1024"}
-
 DEFAULT_STEPS = int(os.getenv("FLUX_DEFAULT_STEPS", "4"))
 DEFAULT_GUIDANCE = float(os.getenv("FLUX_DEFAULT_GUIDANCE", "1.0"))
+VALID_SIZES = {"864x1184", "1184x864", "768x1344", "1344x768", "1024x1024"}
+
 
 @router.post("/images/generations", response_model=ImageGenerationResponse)
-async def openai_generate(request: ImageGenerationRequest) -> ImageGenerationResponse:
+async def openai_generate(request: ImageGenerationRequest):
+    """Generate an image from a text prompt via OpenAI-compatible API.
+
+    Validates size, n, and response_format parameters, then calls the
+    image generation service. Returns a base64-encoded image.
+
+    :param request: The image generation request containing model, prompt,
+        size, and optional tuning parameters.
+    :returns: ImageGenerationResponse with a base64-encoded PNG image.
+    :raises HTTPException 400: If size is invalid, n != 1, or prompt is empty.
+    :raises HTTPException 400: If response_format is not 'b64_json' or 'url'.
+    :raises HTTPException 501: If response_format='url' is requested.
+    :raises HTTPException 500: If an unexpected error occurs during
+        image generation.
+    """
+    logger.info(f"Received: model={request.model!r}, size={request.size!r}, "
+                f"n={request.n}, response_format={request.response_format!r}, "
+                f"prompt={request.prompt[:80]!r}")
     if request.size not in VALID_SIZES:
         raise HTTPException(400, f"size must be one of {VALID_SIZES}")
     if request.n != 1:
@@ -28,28 +45,62 @@ async def openai_generate(request: ImageGenerationRequest) -> ImageGenerationRes
     w, h = map(int, request.size.split("x"))
 
     try:
-        image, _ = run_inference(
+        img_bytes, revised_prompt = await generate_image(
+            model=request.model,
             prompt=request.prompt,
             width=w,
             height=h,
-            num_inference_steps=DEFAULT_STEPS,
-            guidance_scale=DEFAULT_GUIDANCE,
+            steps=DEFAULT_STEPS,
+            guidance=DEFAULT_GUIDANCE,
         )
-        buf = BytesIO()
-        image.save(buf, format="PNG")
-        b64 = base64.b64encode(buf.getvalue()).decode()
-
+        b64 = base64.b64encode(img_bytes).decode()
         return ImageGenerationResponse(
             created=int(time.time()),
-            data=[ImageObject(b64_json=b64, revised_prompt=request.prompt)],
+            data=[ImageObject(b64_json=b64, revised_prompt=revised_prompt)]
         )
+    except ValueError as e:
+        logger.error(f"ValueError in generate_image: {e}")
+        raise HTTPException(400, str(e))
     except Exception as e:
-        logger.error(f"OpenAI-compat generation error: {e}")
-        raise HTTPException(500, f"Image generation failed: {e}")
+        logger.error(f"Generation error: {e}")
+        raise HTTPException(500, "Image generation failed")
 
-@router.get("/models")
-def list_models():
-    return {"object": "list", "data": [
-        {"id": "flux-schnell", "object": "model",
-         "created": 1700000000, "owned_by": "local"}
-    ]}
+
+@router.post("/images/edits", response_model=ImageGenerationResponse)
+async def openai_edit(request: ImageEditRequest):
+    """Edit an existing image based on a text prompt via OpenAI-compatible API.
+
+    Validates size and n parameters, then calls the image edit service.
+    Returns a base64-encoded edited image.
+
+    :param request: The image edit request containing model, prompt,
+        input image (base64), and size.
+    :returns: ImageGenerationResponse with a base64-encoded PNG image.
+    :raises HTTPException 400: If size is invalid or n != 1.
+    :raises HTTPException 500: If an unexpected error occurs during
+        image editing.
+    """
+    logger.info(f"Edit: model={request.model!r}, size={request.size!r}, "
+                f"prompt={request.prompt[:80]!r}")
+    if request.n != 1:
+        raise HTTPException(400, "Only n=1 is supported")
+    if request.size not in VALID_SIZES:
+        raise HTTPException(400, f"size must be one of {VALID_SIZES}")
+
+    try:
+        img_bytes, revised_prompt = await edit_image(
+            model=request.model,
+            prompt=request.prompt,
+            image_b64=request.image,
+        )
+        b64 = base64.b64encode(img_bytes).decode()
+        return ImageGenerationResponse(
+            created=int(time.time()),
+            data=[ImageObject(b64_json=b64, revised_prompt=revised_prompt)]
+        )
+    except ValueError as e:
+        logger.error(f"ValueError in edit_image: {e}")
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.error(f"Edit error: {e}")
+        raise HTTPException(500, "Image edit failed")
