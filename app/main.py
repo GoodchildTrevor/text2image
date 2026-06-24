@@ -3,8 +3,8 @@ import torch
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from app.routes.direct_image import router as direct_router
-from app.routes.openai_compat import router as openai_router
+from app.routers.direct_image import router as direct_router
+from app.routers.openai_compat import router as openai_router
 from app.service import get_pipeline
 
 os.environ["TORCHDYNAMO_DISABLE"] = "1"

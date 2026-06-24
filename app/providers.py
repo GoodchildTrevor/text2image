@@ -44,7 +44,7 @@ class BaseProvider:
         prompt: str,
         image_b64: str,
         **kwargs,
-    ) -> Tuple[bytes, str]:
+    ) -> tuple[bytes, str]:
         """Edit an existing image based on a text prompt.
 
         :param model: The model identifier to use for editing.
@@ -76,7 +76,7 @@ class RouterAIProvider(BaseProvider):
     def _auth_headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}"}
 
-    def _parse_response(self, data: dict) -> Tuple[bytes, str]:
+    def _parse_response(self, data: dict) -> tuple[bytes, str]:
         """Parse RouterAI chat/completions response and extract image bytes.
 
         Handles all known response formats:
@@ -164,7 +164,7 @@ class RouterAIProvider(BaseProvider):
         steps: int = None,
         guidance: float = None,
         **kwargs,
-    ) -> Tuple[bytes, str]:
+    ) -> tuple[bytes, str]:
         """Text-to-image via RouterAI chat/completions.
 
         Width and height are accepted for interface compatibility but
@@ -189,7 +189,7 @@ class RouterAIProvider(BaseProvider):
         prompt: str,
         image_b64: str,
         **kwargs,
-    ) -> Tuple[bytes, str]:
+    ) -> tuple[bytes, str]:
         """Image-to-image edit via RouterAI chat/completions.
 
         :param image_b64: Base64-encoded image — either a data URI
@@ -210,7 +210,7 @@ class RouterAIProvider(BaseProvider):
             return self._parse_response(data)
 
 
-def build_providers() -> Dict[str, Optional[BaseProvider]]:
+def build_providers() -> dict[str, Optional[BaseProvider]]:
     """Build the provider registry from environment variables.
 
     Environment variables:
@@ -219,7 +219,7 @@ def build_providers() -> Dict[str, Optional[BaseProvider]]:
 
     :returns: Dict mapping model name to provider instance (or None for local models).
     """
-    providers: Dict[str, Optional[BaseProvider]] = {
+    providers: dict[str, Optional[BaseProvider]] = {
         "flux-schnell": None,
         "google/gemini-3.1-flash-image-preview": None,
         "google/gemini-3-pro-image-preview": None,
