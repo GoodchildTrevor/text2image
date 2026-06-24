@@ -95,8 +95,7 @@ async def generate_image(
     """Generate an image from a text prompt using the specified provider.
 
     Routes to a local diffusion pipeline (when ``provider is None``) or
-    to a cloud provider (e.g. RouterAI). Returns PNG bytes and the final
-    prompt used.
+    to a cloud provider. Returns PNG bytes and the final prompt used.
 
     :param model: The model identifier to look up in the provider registry.
     :param prompt: The text prompt describing the desired image.

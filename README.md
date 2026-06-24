@@ -1,6 +1,6 @@
 # imgen
 
-A self-hosted **image generation API** with an OpenAI-compatible interface. Routes requests to a local [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) diffusion pipeline or to cloud models via [RouterAI](https://routerai.ru) — all controlled through environment variables, no code changes needed.
+A self-hosted **image generation API** with an OpenAI-compatible interface. Routes requests to a local [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) diffusion pipeline or to any OpenAI-compatible cloud provider — all controlled through environment variables, no code changes needed.
 
 Built with FastAPI. Packaged as a Docker container with NVIDIA GPU support.
 
@@ -9,7 +9,8 @@ Built with FastAPI. Packaged as a Docker container with NVIDIA GPU support.
 ## Features
 
 - **OpenAI-compatible API** — drop-in replacement for `openai.images.generate` and `openai.images.edit`
-- **Multi-provider routing** — local FLUX pipeline or cloud models (Gemini, GPT image, etc.) selected per-request by `model` field
+- **Multi-provider routing** — local FLUX pipeline or cloud models selected per-request by `model` field
+- **Any OpenAI-compatible backend** — point `CLOUD_API_BASE_URL` at any provider (OpenAI, self-hosted, proxy, etc.)
 - **Zero hardcode** — all model names, sizes, and inference defaults are configured via env vars
 - **Memory-efficient local inference** — VAE slicing/tiling, attention slicing, async lock to prevent concurrent CUDA errors
 - **Lazy or eager model loading** — loads on first request, or at startup with `PRELOAD_MODEL=true`
@@ -43,7 +44,7 @@ cd imgen
 cp .env.example .env
 ```
 
-Edit `.env` — at minimum set `HF_TOKEN` for local mode, or `API_KEY` + `CLOUD_MODELS` for cloud mode.
+Edit `.env` — at minimum set `HF_TOKEN` for local mode, or `API_KEY` + `CLOUD_API_BASE_URL` + `CLOUD_MODELS` for cloud mode.
 
 **3. Build and run:**
 
@@ -64,8 +65,9 @@ All configuration is done via environment variables. See [`.env.example`](.env.e
 | `HF_TOKEN` | — | HuggingFace token for downloading gated models (local mode) |
 | `LOCAL_MODEL` | `black-forest-labs/FLUX.1-schnell` | HuggingFace model ID for the local diffusion pipeline |
 | `LOCAL_MODELS` | value of `LOCAL_MODEL` | Comma-separated short names that route to the local pipeline |
-| `API_KEY` | — | RouterAI API key — enables cloud model routing |
-| `CLOUD_MODELS` | — | Comma-separated cloud model IDs routed through RouterAI |
+| `API_KEY` | — | Bearer token for the cloud provider |
+| `CLOUD_API_BASE_URL` | — | Base URL of the OpenAI-compatible cloud endpoint |
+| `CLOUD_MODELS` | — | Comma-separated cloud model IDs routed to the cloud provider |
 | `FLUX_DEFAULT_STEPS` | `4` | Default denoising steps for local inference |
 | `FLUX_DEFAULT_GUIDANCE` | `1.0` | Default guidance scale for local inference |
 | `VALID_SIZES` | `1024x1024,864x1184,...` | Comma-separated allowed output sizes (`WxH`) |
@@ -83,8 +85,9 @@ LOCAL_MODELS=flux-schnell
 ### Example: cloud-only setup
 
 ```env
-API_KEY=your_routerai_key
-CLOUD_MODELS=google/gemini-3.1-flash-image-preview,openai/gpt-5-image
+API_KEY=your_api_key
+CLOUD_API_BASE_URL=https://api.openai.com/v1
+CLOUD_MODELS=gpt-image-1
 ```
 
 ### Example: mixed setup
@@ -93,8 +96,9 @@ CLOUD_MODELS=google/gemini-3.1-flash-image-preview,openai/gpt-5-image
 HF_TOKEN=hf_your_token_here
 LOCAL_MODEL=black-forest-labs/FLUX.1-schnell
 LOCAL_MODELS=flux-schnell
-API_KEY=your_routerai_key
-CLOUD_MODELS=google/gemini-3.1-flash-image-preview,openai/gpt-5-image
+API_KEY=your_api_key
+CLOUD_API_BASE_URL=https://your-proxy.example.com/api/v1
+CLOUD_MODELS=gpt-image-1,google/gemini-2.0-flash-image-preview
 ```
 
 ---
@@ -163,7 +167,7 @@ response = client.images.generate(
 
 # Cloud model
 response = client.images.generate(
-    model="google/gemini-3.1-flash-image-preview",
+    model="gpt-image-1",
     prompt="a futuristic city at sunset, watercolor style",
     size="1024x1024",
 )
@@ -197,7 +201,7 @@ with open("input.png", "rb") as f:
     image_b64 = base64.b64encode(f.read()).decode()
 
 response = client.images.edit(
-    model="google/gemini-3.1-flash-image-preview",
+    model="gpt-image-1",
     image=image_b64,
     prompt="make it look like a painting",
 )
@@ -221,7 +225,7 @@ imgen/
 ├── app/
 │   ├── main.py            # FastAPI app, lifespan, router registration
 │   ├── config.py          # Pydantic request/response models
-│   ├── providers.py       # Provider registry — local pipeline and RouterAI cloud
+│   ├── providers.py       # Provider registry — local pipeline and cloud
 │   ├── service.py         # Inference logic and provider routing
 │   └── routers/
 │       ├── direct_image.py   # POST /generate → raw PNG

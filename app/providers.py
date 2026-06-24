@@ -56,37 +56,38 @@ class BaseProvider:
         raise NotImplementedError
 
 
-class RouterAIProvider(BaseProvider):
-    """Image generation and editing provider via RouterAI API (https://routerai.ru).
+class OpenAICompatProvider(BaseProvider):
+    """Image generation and editing via an OpenAI-compatible chat/completions API.
 
-    Text-to-image and image-edit operations are performed through the
-    RouterAI chat/completions endpoint.
+    Communicates with any provider that implements the OpenAI chat/completions
+    interface and returns images in the response (data URI, inlineData, or URL).
 
-    :param api_key: API key for RouterAI. Falls back to API_KEY env var.
+    :param api_key: Bearer token for the provider API.
+    :param base_url: Base URL of the OpenAI-compatible endpoint.
     """
 
-    def __init__(self, api_key: str = None):
-        """Initialize RouterAIProvider.
+    def __init__(self, api_key: str = None, base_url: str = None):
+        """Initialize OpenAICompatProvider.
 
-        :param api_key: API key for RouterAI. Falls back to
-            ``API_KEY`` environment variable if not provided.
+        :param api_key: Bearer token. Falls back to ``API_KEY`` env var.
+        :param base_url: API base URL. Falls back to ``CLOUD_API_BASE_URL`` env var.
         """
         self.api_key = api_key or os.getenv("API_KEY")
-        self.base_url = "https://routerai.ru/api/v1"
+        self.base_url = base_url or os.getenv("CLOUD_API_BASE_URL", "").rstrip("/")
 
     def _auth_headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}"}
 
     def _parse_response(self, data: dict) -> tuple[bytes, str]:
-        """Parse RouterAI chat/completions response and extract image bytes.
+        """Parse an OpenAI-compatible chat/completions response and extract image bytes.
 
-        Handles all known response formats:
+        Handles all known image response formats:
         - ``message.images[].image_url.url`` — data URI or HTTP URL
         - ``message.parts[].inlineData`` — Gemini-style base64
         - ``message.parts[].fileData.fileUri``
         - ``message.content`` — plain data URI or HTTP URL
 
-        :param data: The JSON response dict from RouterAI chat/completions.
+        :param data: The JSON response dict from the chat/completions endpoint.
         :returns: A tuple of (image_bytes, text_content).
         :raises ValueError: If no image is found in the response.
         """
@@ -98,11 +99,11 @@ class RouterAIProvider(BaseProvider):
         for img in images:
             url = (img.get("image_url") or {}).get("url", "")
             if url.startswith("data:image"):
-                logger.info("RouterAI: image found in message.images (data URI)")
+                logger.info("cloud: image found in message.images (data URI)")
                 b64 = re.sub(r"^data:image/.+;base64,", "", url)
                 return base64.b64decode(b64), content or ""
             if url.startswith("http"):
-                logger.info("RouterAI: image found in message.images (URL) — not supported in sync parse")
+                logger.info("cloud: image found in message.images (URL) — not supported in sync parse")
                 raise ValueError("HTTP image URL in message.images is not supported in _parse_response")
 
         for part in parts:
@@ -110,20 +111,20 @@ class RouterAIProvider(BaseProvider):
                 continue
             inline = part.get("inlineData") or part.get("inline_data")
             if inline:
-                logger.info("RouterAI: image found in inlineData")
+                logger.info("cloud: image found in inlineData")
                 return base64.b64decode(inline["data"]), content or ""
             url = (
                 (part.get("fileData") or {}).get("fileUri")
                 or (part.get("image_url") or {}).get("url", "")
             )
             if url.startswith("data:image"):
-                logger.info("RouterAI: image found in parts (data URI)")
+                logger.info("cloud: image found in parts (data URI)")
                 b64 = re.sub(r"^data:image/.+;base64,", "", url)
                 return base64.b64decode(b64), content or ""
 
         if isinstance(content, str):
             if content.startswith("data:image"):
-                logger.info("RouterAI: image found in content (data URI)")
+                logger.info("cloud: image found in content (data URI)")
                 b64 = re.sub(r"^data:image/.+;base64,", "", content)
                 return base64.b64decode(b64), content
             if content.startswith("http"):
@@ -138,7 +139,7 @@ class RouterAIProvider(BaseProvider):
     async def _chat_completions(
         self, client: httpx.AsyncClient, model: str, messages: list
     ) -> dict:
-        """Send a chat/completions request to RouterAI API.
+        """Send a chat/completions request to the cloud provider.
 
         :param client: The httpx.AsyncClient instance.
         :param model: The model identifier.
@@ -153,7 +154,7 @@ class RouterAIProvider(BaseProvider):
         )
         resp.raise_for_status()
         data = resp.json()
-        logger.info(f"RouterAI response: {json.dumps(data, ensure_ascii=False)[:500]}")
+        logger.info(f"cloud response: {json.dumps(data, ensure_ascii=False)[:500]}")
         return data
 
     async def generate(
@@ -166,17 +167,17 @@ class RouterAIProvider(BaseProvider):
         guidance: float = None,
         **kwargs,
     ) -> tuple[bytes, str]:
-        """Text-to-image via RouterAI chat/completions.
+        """Text-to-image via OpenAI-compatible chat/completions.
 
-        Width and height are accepted for interface compatibility but
-        ignored — RouterAI does not support explicit size parameters.
+        Width, height, steps, and guidance are accepted for interface
+        compatibility but ignored — the cloud provider controls output size.
 
         :param model: The model identifier.
         :param prompt: The text prompt describing the desired image.
-        :param width: Requested width (ignored by RouterAI).
-        :param height: Requested height (ignored by RouterAI).
-        :param steps: Number of inference steps (ignored by RouterAI).
-        :param guidance: Guidance scale (ignored by RouterAI).
+        :param width: Requested width (passed for interface compatibility, ignored).
+        :param height: Requested height (passed for interface compatibility, ignored).
+        :param steps: Number of inference steps (ignored by cloud provider).
+        :param guidance: Guidance scale (ignored by cloud provider).
         :returns: A tuple of (image_bytes, revised_prompt).
         """
         async with httpx.AsyncClient(timeout=120) as client:
@@ -191,7 +192,7 @@ class RouterAIProvider(BaseProvider):
         image_b64: str,
         **kwargs,
     ) -> tuple[bytes, str]:
-        """Image-to-image edit via RouterAI chat/completions.
+        """Image-to-image edit via OpenAI-compatible chat/completions.
 
         :param image_b64: Base64-encoded image — either a data URI
                           (``data:image/png;base64,...``) or raw base64 string.
@@ -215,13 +216,13 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
     """Build the provider registry from environment variables.
 
     Environment variables:
-        LOCAL_MODEL   — Single local model HuggingFace ID (used as fallback
-                        when LOCAL_MODELS is not set).
-        LOCAL_MODELS  — Comma-separated short model names that map to the local
-                        pipeline (provider = None). Defaults to LOCAL_MODEL value
-                        or "flux-schnell".
-        API_KEY       — API key for RouterAI cloud provider.
-        CLOUD_MODELS  — Comma-separated cloud model IDs routed to RouterAI.
+        LOCAL_MODEL        — HuggingFace model ID for the local diffusion pipeline.
+                             Also used as fallback when LOCAL_MODELS is not set.
+        LOCAL_MODELS       — Comma-separated short model names that map to the local
+                             pipeline (provider = None). Defaults to LOCAL_MODEL.
+        API_KEY            — Bearer token for the cloud provider API.
+        CLOUD_API_BASE_URL — Base URL of the OpenAI-compatible cloud endpoint.
+        CLOUD_MODELS       — Comma-separated cloud model IDs routed to the cloud provider.
 
     :returns: Dict mapping model name to provider instance (or None for local).
     """
@@ -234,16 +235,19 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
             providers[model_name] = None
             logger.info(f"Registered local model: {model_name!r}")
 
-    router_key = os.getenv("API_KEY")
-    if router_key:
-        router = RouterAIProvider(api_key=router_key)
+    api_key = os.getenv("API_KEY")
+    base_url = os.getenv("CLOUD_API_BASE_URL", "").rstrip("/")
+    if api_key and base_url:
+        cloud = OpenAICompatProvider(api_key=api_key, base_url=base_url)
         for model_name in os.getenv("CLOUD_MODELS", "").split(","):
             model_name = model_name.strip()
             if model_name:
-                providers[model_name] = router
-                logger.info(f"Registered cloud model: {model_name!r}")
+                providers[model_name] = cloud
+                logger.info(f"Registered cloud model: {model_name!r} → {base_url}")
+    elif api_key and not base_url:
+        logger.warning("API_KEY is set but CLOUD_API_BASE_URL is missing — cloud models unavailable")
     else:
-        logger.warning("API_KEY is not set — cloud models unavailable")
+        logger.info("API_KEY not set — cloud models disabled")
 
     return providers
 
