@@ -30,18 +30,10 @@ async def generate_image_endpoint(request: TextToImageRequest) -> Response:
         raise HTTPException(400, "Height must be 256-1024, divisible by 8")
     if not (256 <= request.width <= 1024 and request.width % 8 == 0):
         raise HTTPException(400, "Width must be 256-1024, divisible by 8")
-<<<<<<< HEAD
 
     try:
         img_bytes, revised = await generate_image(
             model=request.model,
-=======
-    if not (1 <= request.num_inference_steps <= 50):
-        raise HTTPException(400, "num_inference_steps must be in [1, 50]")
-
-    try:
-        image, _ = await run_inference(
->>>>>>> 6e298f99077d321e30a27d9fd2c4084df75c6129
             prompt=request.prompt,
             width=request.width,
             height=request.height,
@@ -55,9 +47,5 @@ async def generate_image_endpoint(request: TextToImageRequest) -> Response:
         raise HTTPException(400, str(e))
     except Exception as e:
         logger.error(f"Generation error: {e}")
-<<<<<<< HEAD
         raise HTTPException(500, "Image generation failed")
     
-=======
-        raise HTTPException(500, f"Image generation failed: {e}")
->>>>>>> 6e298f99077d321e30a27d9fd2c4084df75c6129

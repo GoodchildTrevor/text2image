@@ -1,8 +1,5 @@
 import asyncio
-<<<<<<< HEAD
 from io import BytesIO
-=======
->>>>>>> 6e298f99077d321e30a27d9fd2c4084df75c6129
 import time
 import torch
 from functools import lru_cache
@@ -49,7 +46,6 @@ async def run_inference(
     num_inference_steps: int,
     guidance_scale: float,
 ) -> tuple[Image.Image, float]:
-<<<<<<< HEAD
     """Run FLUX.1-schnell image generation inference.
 
     Serialized via :data:`_inference_lock` to prevent concurrent CUDA
@@ -62,9 +58,6 @@ async def run_inference(
     :param guidance_scale: Classifier-free guidance scale.
     :returns: A tuple of (generated PIL Image, elapsed seconds).
     """
-=======
-    """Run FLUX inference. Serialized via asyncio.Lock to prevent concurrent CUDA errors."""
->>>>>>> 6e298f99077d321e30a27d9fd2c4084df75c6129
     async with _inference_lock:
         pipe = get_pipeline()
         torch.cuda.empty_cache()
@@ -82,7 +75,6 @@ async def run_inference(
         peak_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
         logger.info(f"Inference: {elapsed:.2f}s | Peak VRAM: {peak_gb:.2f} GB")
         return output.images[0], elapsed
-<<<<<<< HEAD
 
 
 async def generate_image(
@@ -162,5 +154,3 @@ async def edit_image(
         prompt=prompt,
         image_b64=image_b64,
     )
-=======
->>>>>>> 6e298f99077d321e30a27d9fd2c4084df75c6129
