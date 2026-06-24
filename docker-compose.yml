@@ -10,11 +10,16 @@ services:
       - HF_TOKEN=${HF_TOKEN}
       - HF_HOME=/root/.cache/huggingface
       - NVIDIA_VISIBLE_DEVICES=all
-      - FLUX_DEFAULT_STEPS=4
-      - FLUX_DEFAULT_GUIDANCE=1.0
+      - LOCAL_MODEL=black-forest-labs/FLUX.1-schnell
+      - LOCAL_MODELS=flux-schnell
+      - API_KEY=${API_KEY}
+      - CLOUD_API_BASE_URL=${CLOUD_API_BASE_URL}
+      - CLOUD_MODELS=${CLOUD_MODELS}
+      - VALID_SIZES=${VALID_SIZES}
+      - FLUX_DEFAULT_STEPS=${FLUX_DEFAULT_STEPS}
+      - FLUX_DEFAULT_GUIDANCE=${FLUX_DEFAULT_GUIDANCE}
     volumes:
       - hf_cache:/root/.cache/huggingface 
-    
 
 volumes:
   hf_cache: 
