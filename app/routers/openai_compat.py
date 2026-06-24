@@ -11,7 +11,13 @@ router = APIRouter(prefix="/v1")
 
 DEFAULT_STEPS = int(os.getenv("FLUX_DEFAULT_STEPS", "4"))
 DEFAULT_GUIDANCE = float(os.getenv("FLUX_DEFAULT_GUIDANCE", "1.0"))
-VALID_SIZES = {"864x1184", "1184x864", "768x1344", "1344x768", "1024x1024"}
+
+_default_sizes = "1024x1024,864x1184,1184x864,768x1344,1344x768"
+VALID_SIZES = set(
+    s.strip()
+    for s in os.getenv("VALID_SIZES", _default_sizes).split(",")
+    if s.strip()
+)
 
 
 @router.post("/images/generations", response_model=ImageGenerationResponse)

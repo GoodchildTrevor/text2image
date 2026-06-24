@@ -53,6 +53,7 @@ class BaseProvider:
         :returns: A tuple of (image_bytes, revised_prompt).
         :raises NotImplementedError: This is an abstract method.
         """
+        raise NotImplementedError
 
 
 class RouterAIProvider(BaseProvider):
@@ -61,16 +62,16 @@ class RouterAIProvider(BaseProvider):
     Text-to-image and image-edit operations are performed through the
     RouterAI chat/completions endpoint.
 
-    :param api_key: API key for RouterAI. Falls back to ROUTERAI_API_KEY env var.
+    :param api_key: API key for RouterAI. Falls back to API_KEY env var.
     """
 
     def __init__(self, api_key: str = None):
         """Initialize RouterAIProvider.
 
         :param api_key: API key for RouterAI. Falls back to
-            ``ROUTERAI_API_KEY`` environment variable if not provided.
+            ``API_KEY`` environment variable if not provided.
         """
-        self.api_key = api_key or os.getenv("ROUTERAI_API_KEY")
+        self.api_key = api_key or os.getenv("API_KEY")
         self.base_url = "https://routerai.ru/api/v1"
 
     def _auth_headers(self) -> dict:
@@ -214,18 +215,24 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
     """Build the provider registry from environment variables.
 
     Environment variables:
-        API_KEY — API key from your provider.
-        CLOUD_MODELS — Comma-separated model names to register from your provider.
+        LOCAL_MODEL   — Single local model HuggingFace ID (used as fallback
+                        when LOCAL_MODELS is not set).
+        LOCAL_MODELS  — Comma-separated short model names that map to the local
+                        pipeline (provider = None). Defaults to LOCAL_MODEL value
+                        or "flux-schnell".
+        API_KEY       — API key for RouterAI cloud provider.
+        CLOUD_MODELS  — Comma-separated cloud model IDs routed to RouterAI.
 
-    :returns: Dict mapping model name to provider instance (or None for local models).
+    :returns: Dict mapping model name to provider instance (or None for local).
     """
-    providers: dict[str, Optional[BaseProvider]] = {
-        "flux-schnell": None,
-        "google/gemini-3.1-flash-image-preview": None,
-        "google/gemini-3-pro-image-preview": None,
-        "openai/gpt-5-image": None,
-        "openai/gpt-5.4-image-2": None,
-    }
+    providers: dict[str, Optional[BaseProvider]] = {}
+
+    local_default = os.getenv("LOCAL_MODEL", "flux-schnell")
+    for model_name in os.getenv("LOCAL_MODELS", local_default).split(","):
+        model_name = model_name.strip()
+        if model_name:
+            providers[model_name] = None
+            logger.info(f"Registered local model: {model_name!r}")
 
     router_key = os.getenv("API_KEY")
     if router_key:
@@ -234,8 +241,9 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
             model_name = model_name.strip()
             if model_name:
                 providers[model_name] = router
+                logger.info(f"Registered cloud model: {model_name!r}")
     else:
-        logger.warning("ROUTERAI_API_KEY is not set — RouterAI models unavailable")
+        logger.warning("API_KEY is not set — cloud models unavailable")
 
     return providers
 

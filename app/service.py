@@ -1,4 +1,5 @@
 import asyncio
+import os
 from io import BytesIO
 import time
 import torch
@@ -13,17 +14,23 @@ logger = logging.getLogger(__name__)
 
 _inference_lock = asyncio.Lock()
 
+LOCAL_MODEL_ID = os.getenv("LOCAL_MODEL", "black-forest-labs/FLUX.1-schnell")
+_LOCAL_DEFAULT_STEPS = int(os.getenv("FLUX_DEFAULT_STEPS", "4"))
+_LOCAL_DEFAULT_GUIDANCE = float(os.getenv("FLUX_DEFAULT_GUIDANCE", "1.0"))
+
 
 @lru_cache(maxsize=1)
 def get_pipeline() -> FluxPipeline:
-    """Load and cache the FLUX.1-schnnell diffusion pipeline.
+    """Load and cache the local diffusion pipeline.
 
-    The pipeline is loaded once and cached via ``@lru_cache``. Applies
-    VRAM-saving optimizations (slicing, tiling, attention slicing).
+    The model is taken from the ``LOCAL_MODEL`` environment variable
+    (default: ``black-forest-labs/FLUX.1-schnell``). The pipeline is
+    loaded once and cached via ``@lru_cache``. Applies VRAM-saving
+    optimizations (slicing, tiling, attention slicing).
 
     :returns: A configured :class:`FluxPipeline` instance.
     """
-    model_id = "black-forest-labs/FLUX.1-schnell"
+    model_id = LOCAL_MODEL_ID
     logger.info(f"Loading model '{model_id}'...")
     pipe = FluxPipeline.from_pretrained(
         model_id,
@@ -46,7 +53,7 @@ async def run_inference(
     num_inference_steps: int,
     guidance_scale: float,
 ) -> tuple[Image.Image, float]:
-    """Run FLUX.1-schnell image generation inference.
+    """Run local diffusion pipeline inference.
 
     Serialized via :data:`_inference_lock` to prevent concurrent CUDA
     errors. Logs elapsed time and peak VRAM usage after each run.
@@ -87,20 +94,19 @@ async def generate_image(
 ) -> tuple[bytes, str]:
     """Generate an image from a text prompt using the specified provider.
 
-    Routes to a local FLUX pipeline (when ``provider is None``) or to a
-    cloud provider (e.g. RouterAI). Returns PNG bytes and the final
+    Routes to a local diffusion pipeline (when ``provider is None``) or
+    to a cloud provider (e.g. RouterAI). Returns PNG bytes and the final
     prompt used.
 
     :param model: The model identifier to look up in the provider registry.
     :param prompt: The text prompt describing the desired image.
     :param width: The requested image width in pixels.
     :param height: The requested image height in pixels.
-    :param steps: Number of inference steps (default: 4 for local).
-    :param guidance: Guidance scale (default: 1.0 for local).
+    :param steps: Number of inference steps (falls back to FLUX_DEFAULT_STEPS).
+    :param guidance: Guidance scale (falls back to FLUX_DEFAULT_GUIDANCE).
     :returns: A tuple of (PNG image bytes, prompt used for generation).
     :raises ValueError: If ``model`` is not registered in the provider registry.
     """
-
     if model not in PROVIDERS:
         raise ValueError(f"Unknown model '{model}'")
     provider = PROVIDERS[model]
@@ -110,8 +116,8 @@ async def generate_image(
             prompt=prompt,
             width=width,
             height=height,
-            num_inference_steps=steps or 4,
-            guidance_scale=guidance or 1.0,
+            num_inference_steps=steps or _LOCAL_DEFAULT_STEPS,
+            guidance_scale=guidance or _LOCAL_DEFAULT_GUIDANCE,
         )
         buf = BytesIO()
         image.save(buf, format="PNG")
@@ -123,7 +129,7 @@ async def generate_image(
             width=width,
             height=height,
             steps=steps,
-            guidance=guidance
+            guidance=guidance,
         )
 
 
@@ -134,7 +140,7 @@ async def edit_image(
 ) -> tuple[bytes, str]:
     """Edit an existing image using the specified provider.
 
-    Only cloud providers support image editing; local FLUX pipeline
+    Only cloud providers support image editing; the local pipeline
     will raise ``ValueError``.
 
     :param model: The model identifier to look up in the provider registry.
@@ -143,7 +149,6 @@ async def edit_image(
     :returns: A tuple of (edited PNG image bytes, revised prompt).
     :raises ValueError: If ``model`` is unknown or does not support editing.
     """
-
     if model not in PROVIDERS:
         raise ValueError(f"Unknown model '{model}'")
     provider = PROVIDERS[model]
