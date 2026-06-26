@@ -24,7 +24,7 @@ IMAGES_DIR = pathlib.Path("/app/static/images")
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 # Public base URL for serving static images
-# e.g. "http://imgen:8010" or "https://imgen.example.com"
+# e.g. "https://owui.aeonflask.ru" — images will be at {PUBLIC_BASE_URL}/images/{fname}
 PUBLIC_BASE_URL = os.getenv("IMGEN_PUBLIC_URL", "http://imgen:8010")
 
 # Mapping from OpenRouter resolution tier to pixel dimensions for local pipeline
@@ -37,14 +37,14 @@ _RESOLUTION_TO_PIXELS: dict[str, tuple[int, int]] = {
 
 
 def save_image_bytes(img_bytes: bytes) -> str:
-    """Save PNG bytes to static/images and return public URL.
+    """Save PNG bytes to /app/static/images and return public URL.
 
     :param img_bytes: Raw PNG image bytes.
-    :returns: Public URL string like ``http://imgen:8010/static/images/abc123.png``.
+    :returns: Public URL like ``https://owui.aeonflask.ru/images/abc123.png``.
     """
     fname = f"{uuid.uuid4().hex}.png"
     (IMAGES_DIR / fname).write_bytes(img_bytes)
-    return f"{PUBLIC_BASE_URL}/static/images/{fname}"
+    return f"{PUBLIC_BASE_URL}/images/{fname}"
 
 
 @lru_cache(maxsize=1)

@@ -35,8 +35,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="imgen API", lifespan=lifespan)
 
-# Serve generated images as static files
-app.mount("/static", StaticFiles(directory="/app/static"), name="static")
+# Serve generated images: GET /images/{filename}
+app.mount("/images", StaticFiles(directory="/app/static/images"), name="images")
 
 app.include_router(direct_router)   # POST /generate
 app.include_router(openai_router)   # POST /v1/images/generations
