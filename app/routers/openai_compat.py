@@ -4,7 +4,7 @@ import logging
 import os
 from fastapi import APIRouter, HTTPException
 from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject, ImageEditRequest
-from app.service import generate_image, edit_image
+from app.service import generate_image, edit_image, save_image_bytes
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1")
@@ -41,7 +41,6 @@ def _resolve_size_params(
                 400,
                 f"Invalid resolution {resolution!r}. Must be one of: {sorted(VALID_RESOLUTIONS)}"
             )
-        # resolution wins — size is ignored
         return resolution, aspect_ratio, None, None
 
     if size is not None:
@@ -56,10 +55,34 @@ def _resolve_size_params(
             raise HTTPException(400, f"Malformed size {size!r}, expected WxH format")
         return None, aspect_ratio, w, h
 
-    # Nothing provided — use default size
+    # Nothing provided — default
     default = "1024x1024"
     w, h = map(int, default.split("x"))
     return None, aspect_ratio, w, h
+
+
+def _make_response(img_bytes: bytes, revised_prompt: str, response_format: str) -> ImageGenerationResponse:
+    """Build ImageGenerationResponse from raw bytes.
+
+    When ``response_format`` is ``"url"``, the image is saved to disk and
+    a public URL is returned. Otherwise base64-encodes the bytes.
+
+    :param img_bytes: Raw PNG image bytes.
+    :param revised_prompt: The prompt used/revised by the provider.
+    :param response_format: ``"b64_json"`` or ``"url"``.
+    :returns: :class:`ImageGenerationResponse` with one item.
+    """
+    if response_format == "url":
+        url = save_image_bytes(img_bytes)
+        return ImageGenerationResponse(
+            created=int(time.time()),
+            data=[ImageObject(url=url, revised_prompt=revised_prompt)]
+        )
+    b64 = base64.b64encode(img_bytes).decode()
+    return ImageGenerationResponse(
+        created=int(time.time()),
+        data=[ImageObject(b64_json=b64, revised_prompt=revised_prompt)]
+    )
 
 
 @router.post("/images/generations", response_model=ImageGenerationResponse)
@@ -71,9 +94,8 @@ async def openai_generate(request: ImageGenerationRequest):
     ``resolution`` takes priority and ``size`` is ignored.
 
     :param request: ImageGenerationRequest with model, prompt, and size params.
-    :returns: ImageGenerationResponse with a base64-encoded PNG image.
+    :returns: ImageGenerationResponse with image as b64_json or url.
     :raises HTTPException 400: On invalid params or unknown model.
-    :raises HTTPException 501: If response_format='url' is requested.
     :raises HTTPException 500: On unexpected generation failure.
     """
     logger.info(
@@ -87,8 +109,6 @@ async def openai_generate(request: ImageGenerationRequest):
         raise HTTPException(400, "Only n=1 is supported")
     if request.response_format not in ("b64_json", "url"):
         raise HTTPException(400, "response_format must be 'b64_json' or 'url'")
-    if request.response_format == "url":
-        raise HTTPException(501, "response_format='url' is not implemented yet")
 
     resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(
         request.size, request.resolution, request.aspect_ratio
@@ -107,11 +127,7 @@ async def openai_generate(request: ImageGenerationRequest):
             quality=request.quality,
             size=request.size if resolved_resolution is None else None,
         )
-        b64 = base64.b64encode(img_bytes).decode()
-        return ImageGenerationResponse(
-            created=int(time.time()),
-            data=[ImageObject(b64_json=b64, revised_prompt=revised_prompt)]
-        )
+        return _make_response(img_bytes, revised_prompt, request.response_format)
     except ValueError as e:
         logger.error(f"ValueError in generate_image: {e}")
         raise HTTPException(400, str(e))
@@ -128,7 +144,7 @@ async def openai_edit(request: ImageEditRequest):
     When both are present, ``resolution`` takes priority.
 
     :param request: ImageEditRequest with model, prompt, input image, and size params.
-    :returns: ImageGenerationResponse with a base64-encoded PNG image.
+    :returns: ImageGenerationResponse with image as b64_json or url.
     :raises HTTPException 400: On invalid params or unknown model.
     :raises HTTPException 500: On unexpected edit failure.
     """
@@ -154,11 +170,7 @@ async def openai_edit(request: ImageEditRequest):
             aspect_ratio=resolved_aspect_ratio,
             size=request.size if resolved_resolution is None else None,
         )
-        b64 = base64.b64encode(img_bytes).decode()
-        return ImageGenerationResponse(
-            created=int(time.time()),
-            data=[ImageObject(b64_json=b64, revised_prompt=revised_prompt)]
-        )
+        return _make_response(img_bytes, revised_prompt, request.response_format)
     except ValueError as e:
         logger.error(f"ValueError in edit_image: {e}")
         raise HTTPException(400, str(e))

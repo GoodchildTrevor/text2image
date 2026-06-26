@@ -1,5 +1,7 @@
 import asyncio
 import os
+import uuid
+import pathlib
 from io import BytesIO
 import time
 import torch
@@ -18,6 +20,13 @@ LOCAL_MODEL_ID = os.getenv("LOCAL_MODEL", "black-forest-labs/FLUX.1-schnell")
 _LOCAL_DEFAULT_STEPS = int(os.getenv("FLUX_DEFAULT_STEPS", "4"))
 _LOCAL_DEFAULT_GUIDANCE = float(os.getenv("FLUX_DEFAULT_GUIDANCE", "1.0"))
 
+IMAGES_DIR = pathlib.Path("/app/static/images")
+IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+# Public base URL for serving static images
+# e.g. "http://imgen:8010" or "https://imgen.example.com"
+PUBLIC_BASE_URL = os.getenv("IMGEN_PUBLIC_URL", "http://imgen:8010")
+
 # Mapping from OpenRouter resolution tier to pixel dimensions for local pipeline
 _RESOLUTION_TO_PIXELS: dict[str, tuple[int, int]] = {
     "512": (512, 512),
@@ -25,6 +34,17 @@ _RESOLUTION_TO_PIXELS: dict[str, tuple[int, int]] = {
     "2K":  (2048, 2048),
     "4K":  (4096, 4096),
 }
+
+
+def save_image_bytes(img_bytes: bytes) -> str:
+    """Save PNG bytes to static/images and return public URL.
+
+    :param img_bytes: Raw PNG image bytes.
+    :returns: Public URL string like ``http://imgen:8010/static/images/abc123.png``.
+    """
+    fname = f"{uuid.uuid4().hex}.png"
+    (IMAGES_DIR / fname).write_bytes(img_bytes)
+    return f"{PUBLIC_BASE_URL}/static/images/{fname}"
 
 
 @lru_cache(maxsize=1)

@@ -1,8 +1,10 @@
 import os
+import pathlib
 import torch
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from app.routers.direct_image import router as direct_router
 from app.routers.openai_compat import router as openai_router
 from app.service import get_pipeline
@@ -14,10 +16,13 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
     handlers=[
-        logging.FileHandler("text2image.log", encoding="utf-8"),
+        logging.FileHandler("imgen.log", encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
+
+IMAGES_DIR = pathlib.Path("/app/static/images")
+IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @asynccontextmanager
@@ -28,10 +33,13 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Text-to-Image API", lifespan=lifespan)
+app = FastAPI(title="imgen API", lifespan=lifespan)
 
-app.include_router(direct_router)    # POST /generate
-app.include_router(openai_router)    # POST /v1/images/generations
+# Serve generated images as static files
+app.mount("/static", StaticFiles(directory="/app/static"), name="static")
+
+app.include_router(direct_router)   # POST /generate
+app.include_router(openai_router)   # POST /v1/images/generations
 
 
 @app.get("/health")
