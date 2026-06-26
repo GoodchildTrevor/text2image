@@ -29,12 +29,17 @@ def _resolve_size_params(
 ) -> tuple[str | None, str | None, int | None, int | None]:
     """Validate and resolve size/resolution/aspect_ratio into canonical values.
 
-    Priority: resolution + aspect_ratio > size.
+    Priority: resolution > size-as-resolution > size-as-pixels.
+
+    If ``size`` matches a known resolution tier (e.g. ``"4K"``) it is
+    transparently promoted to ``resolution`` so OpenRouter receives the
+    correct parameter regardless of which field the caller used.
 
     :returns: (resolved_resolution, resolved_aspect_ratio, width, height)
-              width/height are set only when size is used (local pipeline needs them).
+              width/height are set only when size is a pixel string.
     :raises HTTPException 400: on invalid resolution or size value.
     """
+    # Explicit resolution field always wins
     if resolution is not None:
         if resolution not in VALID_RESOLUTIONS:
             raise HTTPException(
@@ -44,10 +49,16 @@ def _resolve_size_params(
         return resolution, aspect_ratio, None, None
 
     if size is not None:
+        # Treat resolution tiers passed via the `size` field (e.g. OpenWebUI quirk)
+        if size in VALID_RESOLUTIONS:
+            logger.info(f"size={size!r} promoted to resolution tier")
+            return size, aspect_ratio, None, None
+
         if size not in VALID_SIZES:
             raise HTTPException(
                 400,
-                f"Invalid size {size!r}. Must be one of: {sorted(VALID_SIZES)}"
+                f"Invalid size {size!r}. "
+                f"Must be one of: {sorted(VALID_SIZES)} or resolution tier: {sorted(VALID_RESOLUTIONS)}"
             )
         try:
             w, h = map(int, size.split("x"))
@@ -55,10 +66,8 @@ def _resolve_size_params(
             raise HTTPException(400, f"Malformed size {size!r}, expected WxH format")
         return None, aspect_ratio, w, h
 
-    # Nothing provided — default
-    default = "1024x1024"
-    w, h = map(int, default.split("x"))
-    return None, aspect_ratio, w, h
+    # Nothing provided — default 1024x1024
+    return None, aspect_ratio, 1024, 1024
 
 
 def _make_response(img_bytes: bytes, revised_prompt: str, response_format: str) -> ImageGenerationResponse:
@@ -90,8 +99,10 @@ async def openai_generate(request: ImageGenerationRequest):
     """Generate an image from a text prompt via OpenAI-compatible API.
 
     Accepts either ``resolution`` + ``aspect_ratio`` (OpenRouter normalized
-    parameters) or legacy ``size`` (pixel dimensions). When both are present,
-    ``resolution`` takes priority and ``size`` is ignored.
+    parameters) or legacy ``size`` (pixel dimensions or tier string).
+    When both are present, ``resolution`` takes priority and ``size`` is ignored.
+    When ``size`` is a resolution tier (e.g. ``"4K"``), it is promoted
+    to ``resolution`` automatically.
 
     :param request: ImageGenerationRequest with model, prompt, and size params.
     :returns: ImageGenerationResponse with image as b64_json or url.
@@ -142,6 +153,8 @@ async def openai_edit(request: ImageEditRequest):
 
     Accepts either ``resolution`` + ``aspect_ratio`` or legacy ``size``.
     When both are present, ``resolution`` takes priority.
+    When ``size`` is a resolution tier (e.g. ``"4K"``), it is promoted
+    to ``resolution`` automatically.
 
     :param request: ImageEditRequest with model, prompt, input image, and size params.
     :returns: ImageGenerationResponse with image as b64_json or url.
