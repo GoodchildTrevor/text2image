@@ -13,6 +13,86 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+# ── Per-model size constraints ───────────────────────────────────────────────
+# Maps model slug prefix → list of allowed WxH strings (largest first).
+# When the requested size is not in the list, the closest smaller one is used.
+# Models NOT in this map pass the size through as-is.
+_MODEL_ALLOWED_SIZES: dict[str, list[str]] = {
+    # GPT-5 Image family — supports square + two landscape/portrait orientations
+    "openai/gpt-5-image": [
+        "1792x1024", "1024x1792", "1024x1024",
+    ],
+    "openai/gpt-5-image-mini": [
+        "1792x1024", "1024x1792", "1024x1024",
+    ],
+    "openai/gpt-5.4-image-2": [
+        "1792x1024", "1024x1792", "1024x1024",
+    ],
+    # Gemini image family — only 1:1 1024 confirmed via OpenRouter
+    "google/gemini-3.1-flash-image-preview": ["1024x1024"],
+    "google/gemini-3-pro-image-preview":     ["1024x1024"],
+    "google/gemini-2.5-flash-image":         ["1024x1024"],
+}
+
+
+def _clamp_size(model: str, requested: str | None) -> str | None:
+    """Return the best allowed size for *model* given *requested* ``WxH``.
+
+    Strategy:
+    - If model has no size constraints → return *requested* unchanged.
+    - If model has constraints and *requested* is in the list → keep it.
+    - Otherwise pick the largest allowed size whose long side ≤ requested long side.
+    - If nothing is smaller → return the smallest allowed size.
+
+    :param model: OpenRouter model slug.
+    :param requested: Pixel string ``"WxH"`` or ``None``.
+    :returns: Clamped or original size string, or ``None`` if input is ``None``.
+    """
+    if requested is None:
+        return None
+
+    allowed = _MODEL_ALLOWED_SIZES.get(model)
+    if not allowed:
+        return requested  # no constraints for this model
+
+    if requested in allowed:
+        return requested
+
+    try:
+        req_w, req_h = map(int, requested.split("x"))
+    except ValueError:
+        return allowed[0]  # malformed — use largest allowed
+
+    req_long = max(req_w, req_h)
+
+    # Find largest allowed whose long side <= requested long side
+    for candidate in allowed:  # already sorted largest-first
+        try:
+            c_w, c_h = map(int, candidate.split("x"))
+        except ValueError:
+            continue
+        # Match orientation: landscape→landscape, portrait→portrait, square→square
+        req_landscape = req_w > req_h
+        c_landscape = c_w > c_h
+        req_portrait = req_h > req_w
+        c_portrait = c_h > c_w
+        same_orientation = (
+            (req_landscape and c_landscape)
+            or (req_portrait and c_portrait)
+            or (req_w == req_h and c_w == c_h)
+        )
+        if same_orientation and max(c_w, c_h) <= req_long:
+            logger.info(
+                f"size clamp: model={model!r} {requested!r} → {candidate!r}"
+            )
+            return candidate
+
+    # Fallback: square 1024x1024 or last in list
+    fallback = "1024x1024" if "1024x1024" in allowed else allowed[-1]
+    logger.info(f"size clamp fallback: model={model!r} {requested!r} → {fallback!r}")
+    return fallback
+
+
 class BaseProvider(ABC):
     """Abstract base class for image generation providers."""
 
@@ -210,9 +290,9 @@ class OpenRouterProvider(CloudProvider):
     Returns images as ``data[0].b64_json``.
 
     Parameter priority for output dimensions:
-    1. ``resolution`` + ``aspect_ratio``  — forwarded directly to OpenRouter.
-    2. ``size`` (``WxH`` string)          — forwarded as-is; OpenRouter accepts it.
-    3. ``width`` + ``height``             — combined into ``WxH`` size string.
+    1. ``size`` (``WxH`` string) — clamped to model-specific allowed list, then forwarded.
+    2. ``width`` + ``height``    — combined into ``WxH`` size string, then clamped.
+    3. ``resolution`` + ``aspect_ratio`` — forwarded directly (legacy/fallback path).
 
     Docs: https://openrouter.ai/docs/guides/overview/multimodal/image-generation
 
@@ -252,28 +332,33 @@ class OpenRouterProvider(CloudProvider):
         logger.info("openrouter: image received via b64_json")
         return base64.b64decode(b64), ""
 
-    def _build_size_payload(self
-        , resolution: str | None
-        , aspect_ratio: str | None
-        , size: str | None
-        , width: int | None
-        , height: int | None
+    def _build_size_payload(
+        self,
+        model: str,
+        resolution: str | None,
+        aspect_ratio: str | None,
+        size: str | None,
+        width: int | None,
+        height: int | None,
     ) -> dict:
         """Resolve dimension params into OpenRouter payload keys.
 
-        Priority: resolution/aspect_ratio > size > width+height.
+        Priority: size > width+height > resolution/aspect_ratio.
+        ``size`` and derived ``WxH`` strings are clamped via ``_clamp_size``.
         """
         payload = {}
-        if resolution:
+        if size:
+            clamped = _clamp_size(model, size)
+            payload["size"] = clamped
+        elif width and height:
+            raw = f"{width}x{height}"
+            clamped = _clamp_size(model, raw)
+            payload["size"] = clamped
+        elif resolution:
             payload["resolution"] = resolution
             if aspect_ratio:
                 payload["aspect_ratio"] = aspect_ratio
-        elif size:
-            payload["size"] = size
-        elif width and height:
-            payload["size"] = f"{width}x{height}"
         elif aspect_ratio:
-            # aspect_ratio alone without resolution — pass it anyway
             payload["aspect_ratio"] = aspect_ratio
         return payload
 
@@ -294,20 +379,19 @@ class OpenRouterProvider(CloudProvider):
     ) -> tuple[bytes, str]:
         """Text-to-image via OpenRouter /api/v1/images.
 
-        :param model: OpenRouter model slug, e.g. ``openai/gpt-image-1``.
+        :param model: OpenRouter model slug, e.g. ``openai/gpt-5-image``.
         :param prompt: Text prompt.
-        :param resolution: Normalized tier — ``"512"``, ``"1K"``, ``"2K"``, ``"4K"``.
-                           Takes priority over ``size`` and ``width``/``height``.
-        :param aspect_ratio: Normalized ratio, e.g. ``"1:1"``, ``"16:9"``.
-                             Used alongside ``resolution``.
-        :param size: Pixel string ``"WxH"`` or tier string ``"2K"``.
-                     Used when ``resolution`` is not provided.
+        :param size: Pixel string ``"WxH"`` — clamped to model-specific limits.
+        :param resolution: Tier string (``"1K"`` etc.) forwarded only when ``size`` absent.
+        :param aspect_ratio: Ratio string forwarded alongside ``resolution``.
         :param quality: ``auto``, ``low``, ``medium``, or ``high``.
         :param n: Number of images to generate (1-10).
         :returns: A tuple of (PNG image bytes, revised_prompt).
         """
         payload: dict = {"model": model, "prompt": prompt}
-        payload.update(self._build_size_payload(resolution, aspect_ratio, size, width, height))
+        payload.update(
+            self._build_size_payload(model, resolution, aspect_ratio, size, width, height)
+        )
 
         if quality:
             payload["quality"] = quality
@@ -316,7 +400,8 @@ class OpenRouterProvider(CloudProvider):
 
         logger.info(
             f"openrouter generate: model={model!r} "
-            f"resolution={resolution!r} aspect_ratio={aspect_ratio!r} size={size!r}"
+            f"resolution={resolution!r} aspect_ratio={aspect_ratio!r} "
+            f"size={size!r} → payload_size={payload.get('size')!r}"
         )
 
         async with httpx.AsyncClient(timeout=180) as client:
@@ -325,6 +410,16 @@ class OpenRouterProvider(CloudProvider):
                 headers=self._auth_headers(),
                 json=payload,
             )
+            if not resp.is_success:
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = resp.text
+                logger.error(
+                    f"openrouter {resp.status_code}: model={model!r} "
+                    f"payload={json.dumps(payload, ensure_ascii=False)} "
+                    f"response={json.dumps(err_body, ensure_ascii=False)[:500]}"
+                )
             resp.raise_for_status()
             data = resp.json()
             logger.info(f"openrouter response keys: {list(data.keys())}")
@@ -356,14 +451,19 @@ class OpenRouterProvider(CloudProvider):
                 {"type": "image_url", "image_url": {"url": image_b64}}
             ],
         }
-        payload.update(self._build_size_payload(resolution, aspect_ratio, size, None, None))
+        payload.update(
+            self._build_size_payload(model, resolution, aspect_ratio, size, None, None)
+        )
 
         if quality:
             payload["quality"] = quality
         if n and n > 1:
             payload["n"] = n
 
-        logger.info(f"openrouter edit: model={model!r} resolution={resolution!r}")
+        logger.info(
+            f"openrouter edit: model={model!r} resolution={resolution!r} "
+            f"size={size!r} → payload_size={payload.get('size')!r}"
+        )
 
         async with httpx.AsyncClient(timeout=180) as client:
             resp = await client.post(
@@ -371,6 +471,15 @@ class OpenRouterProvider(CloudProvider):
                 headers=self._auth_headers(),
                 json=payload,
             )
+            if not resp.is_success:
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = resp.text
+                logger.error(
+                    f"openrouter edit {resp.status_code}: model={model!r} "
+                    f"response={json.dumps(err_body, ensure_ascii=False)[:500]}"
+                )
             resp.raise_for_status()
             data = resp.json()
             return self._parse_image_response(data)
