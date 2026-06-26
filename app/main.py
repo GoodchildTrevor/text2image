@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from app.routers.direct_image import router as direct_router
 from app.routers.openai_compat import router as openai_router
 from app.service import get_pipeline
+from app import openrouter_caps
 
 os.environ["TORCHDYNAMO_DISABLE"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -27,7 +28,8 @@ IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Optional model warmup on startup. Enable via PRELOAD_MODEL=1."""
+    """Startup: fetch live OpenRouter model capabilities, then optionally warm up local pipeline."""
+    await openrouter_caps.refresh_caps()
     if os.getenv("PRELOAD_MODEL", "0") == "1":
         get_pipeline()
     yield

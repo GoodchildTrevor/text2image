@@ -7,90 +7,11 @@ import json
 import re
 import logging
 from dotenv import load_dotenv
+from app import openrouter_caps
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-
-
-# ── Per-model size constraints ───────────────────────────────────────────────
-# Maps model slug prefix → list of allowed WxH strings (largest first).
-# When the requested size is not in the list, the closest smaller one is used.
-# Models NOT in this map pass the size through as-is.
-_MODEL_ALLOWED_SIZES: dict[str, list[str]] = {
-    # GPT-5 Image family — supports square + two landscape/portrait orientations
-    "openai/gpt-5-image": [
-        "1792x1024", "1024x1792", "1024x1024",
-    ],
-    "openai/gpt-5-image-mini": [
-        "1792x1024", "1024x1792", "1024x1024",
-    ],
-    "openai/gpt-5.4-image-2": [
-        "1792x1024", "1024x1792", "1024x1024",
-    ],
-    # Gemini image family — only 1:1 1024 confirmed via OpenRouter
-    "google/gemini-3.1-flash-image-preview": ["1024x1024"],
-    "google/gemini-3-pro-image-preview":     ["1024x1024"],
-    "google/gemini-2.5-flash-image":         ["1024x1024"],
-}
-
-
-def _clamp_size(model: str, requested: str | None) -> str | None:
-    """Return the best allowed size for *model* given *requested* ``WxH``.
-
-    Strategy:
-    - If model has no size constraints → return *requested* unchanged.
-    - If model has constraints and *requested* is in the list → keep it.
-    - Otherwise pick the largest allowed size whose long side ≤ requested long side.
-    - If nothing is smaller → return the smallest allowed size.
-
-    :param model: OpenRouter model slug.
-    :param requested: Pixel string ``"WxH"`` or ``None``.
-    :returns: Clamped or original size string, or ``None`` if input is ``None``.
-    """
-    if requested is None:
-        return None
-
-    allowed = _MODEL_ALLOWED_SIZES.get(model)
-    if not allowed:
-        return requested  # no constraints for this model
-
-    if requested in allowed:
-        return requested
-
-    try:
-        req_w, req_h = map(int, requested.split("x"))
-    except ValueError:
-        return allowed[0]  # malformed — use largest allowed
-
-    req_long = max(req_w, req_h)
-
-    # Find largest allowed whose long side <= requested long side
-    for candidate in allowed:  # already sorted largest-first
-        try:
-            c_w, c_h = map(int, candidate.split("x"))
-        except ValueError:
-            continue
-        # Match orientation: landscape→landscape, portrait→portrait, square→square
-        req_landscape = req_w > req_h
-        c_landscape = c_w > c_h
-        req_portrait = req_h > req_w
-        c_portrait = c_h > c_w
-        same_orientation = (
-            (req_landscape and c_landscape)
-            or (req_portrait and c_portrait)
-            or (req_w == req_h and c_w == c_h)
-        )
-        if same_orientation and max(c_w, c_h) <= req_long:
-            logger.info(
-                f"size clamp: model={model!r} {requested!r} → {candidate!r}"
-            )
-            return candidate
-
-    # Fallback: square 1024x1024 or last in list
-    fallback = "1024x1024" if "1024x1024" in allowed else allowed[-1]
-    logger.info(f"size clamp fallback: model={model!r} {requested!r} → {fallback!r}")
-    return fallback
 
 
 class BaseProvider(ABC):
@@ -290,9 +211,9 @@ class OpenRouterProvider(CloudProvider):
     Returns images as ``data[0].b64_json``.
 
     Parameter priority for output dimensions:
-    1. ``size`` (``WxH`` string) — clamped to model-specific allowed list, then forwarded.
-    2. ``width`` + ``height``    — combined into ``WxH`` size string, then clamped.
-    3. ``resolution`` + ``aspect_ratio`` — forwarded directly (legacy/fallback path).
+    1. ``size`` (``WxH`` string) — clamped via ``openrouter_caps.clamp_size()``.
+    2. ``width`` + ``height``    — combined into ``WxH``, then clamped.
+    3. ``resolution`` + ``aspect_ratio`` — forwarded directly (legacy/fallback).
 
     Docs: https://openrouter.ai/docs/guides/overview/multimodal/image-generation
 
@@ -344,15 +265,15 @@ class OpenRouterProvider(CloudProvider):
         """Resolve dimension params into OpenRouter payload keys.
 
         Priority: size > width+height > resolution/aspect_ratio.
-        ``size`` and derived ``WxH`` strings are clamped via ``_clamp_size``.
+        ``size`` and derived ``WxH`` strings are clamped via ``openrouter_caps``.
         """
         payload = {}
         if size:
-            clamped = _clamp_size(model, size)
+            clamped = openrouter_caps.clamp_size(model, size)
             payload["size"] = clamped
         elif width and height:
             raw = f"{width}x{height}"
-            clamped = _clamp_size(model, raw)
+            clamped = openrouter_caps.clamp_size(model, raw)
             payload["size"] = clamped
         elif resolution:
             payload["resolution"] = resolution
@@ -504,7 +425,7 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
     """
     providers: dict[str, Optional[BaseProvider]] = {}
 
-    # ── Local models ────────────────────────────────────────────────────────
+    # ── Local models ──────────────────────────────────────────────────────────
     local_default = os.getenv("LOCAL_MODEL", "flux-schnell")
     for model_name in os.getenv("LOCAL_MODELS", local_default).split(","):
         model_name = model_name.strip()
@@ -512,7 +433,7 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
             providers[model_name] = None
             logger.info(f"Registered local model: {model_name!r}")
 
-    # ── OpenAI-compat cloud provider ────────────────────────────────────────
+    # ── OpenAI-compat cloud provider ──────────────────────────────────────────
     api_key = os.getenv("API_KEY")
     base_url = os.getenv("CLOUD_API_BASE_URL", "").rstrip("/")
     if api_key and base_url:
@@ -525,7 +446,7 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
     elif api_key and not base_url:
         logger.warning("API_KEY set but CLOUD_API_BASE_URL missing — cloud models unavailable")
 
-    # ── OpenRouter provider ──────────────────────────────────────────────────
+    # ── OpenRouter provider ───────────────────────────────────────────────────
     or_key = os.getenv("OPENROUTER_API_KEY")
     if or_key:
         openrouter = OpenRouterProvider(api_key=or_key)
