@@ -18,6 +18,14 @@ LOCAL_MODEL_ID = os.getenv("LOCAL_MODEL", "black-forest-labs/FLUX.1-schnell")
 _LOCAL_DEFAULT_STEPS = int(os.getenv("FLUX_DEFAULT_STEPS", "4"))
 _LOCAL_DEFAULT_GUIDANCE = float(os.getenv("FLUX_DEFAULT_GUIDANCE", "1.0"))
 
+# Mapping from OpenRouter resolution tier to pixel dimensions for local pipeline
+_RESOLUTION_TO_PIXELS: dict[str, tuple[int, int]] = {
+    "512": (512, 512),
+    "1K":  (1024, 1024),
+    "2K":  (2048, 2048),
+    "4K":  (4096, 4096),
+}
+
 
 @lru_cache(maxsize=1)
 def get_pipeline() -> FluxPipeline:
@@ -87,22 +95,35 @@ async def run_inference(
 async def generate_image(
     model: str,
     prompt: str,
-    width: int,
-    height: int,
+    width: int | None = None,
+    height: int | None = None,
     steps: int = None,
     guidance: float = None,
+    resolution: str | None = None,
+    aspect_ratio: str | None = None,
+    **kwargs,
 ) -> tuple[bytes, str]:
     """Generate an image from a text prompt using the specified provider.
 
     Routes to a local diffusion pipeline (when ``provider is None``) or
     to a cloud provider. Returns PNG bytes and the final prompt used.
 
+    For the local pipeline, dimensions are resolved in this order:
+    1. Explicit ``width`` + ``height``
+    2. ``resolution`` tier mapped via ``_RESOLUTION_TO_PIXELS``
+    3. Default 1024x1024
+
+    For cloud providers, ``resolution``, ``aspect_ratio``, and any extra
+    ``**kwargs`` (e.g. ``size``, ``quality``) are forwarded as-is.
+
     :param model: The model identifier to look up in the provider registry.
     :param prompt: The text prompt describing the desired image.
-    :param width: The requested image width in pixels.
-    :param height: The requested image height in pixels.
-    :param steps: Number of inference steps (falls back to FLUX_DEFAULT_STEPS).
-    :param guidance: Guidance scale (falls back to FLUX_DEFAULT_GUIDANCE).
+    :param width: Pixel width — used by local pipeline only.
+    :param height: Pixel height — used by local pipeline only.
+    :param steps: Inference steps (local pipeline only).
+    :param guidance: Guidance scale (local pipeline only).
+    :param resolution: OpenRouter resolution tier (``"512"``, ``"1K"``, ``"2K"``, ``"4K"``).
+    :param aspect_ratio: OpenRouter aspect ratio string (``"1:1"``, ``"16:9"``, ...).
     :returns: A tuple of (PNG image bytes, prompt used for generation).
     :raises ValueError: If ``model`` is not registered in the provider registry.
     """
@@ -111,6 +132,12 @@ async def generate_image(
     provider = PROVIDERS[model]
 
     if provider is None:
+        # Resolve pixel dimensions for local pipeline
+        if not (width and height) and resolution:
+            width, height = _RESOLUTION_TO_PIXELS.get(resolution, (1024, 1024))
+        width = width or 1024
+        height = height or 1024
+
         image, _ = await run_inference(
             prompt=prompt,
             width=width,
@@ -129,6 +156,9 @@ async def generate_image(
             height=height,
             steps=steps,
             guidance=guidance,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+            **kwargs,
         )
 
 
@@ -136,6 +166,9 @@ async def edit_image(
     model: str,
     prompt: str,
     image_b64: str,
+    resolution: str | None = None,
+    aspect_ratio: str | None = None,
+    **kwargs,
 ) -> tuple[bytes, str]:
     """Edit an existing image using the specified provider.
 
@@ -145,6 +178,8 @@ async def edit_image(
     :param model: The model identifier to look up in the provider registry.
     :param prompt: The text prompt describing the desired edit.
     :param image_b64: Base64-encoded input image.
+    :param resolution: OpenRouter resolution tier.
+    :param aspect_ratio: OpenRouter aspect ratio string.
     :returns: A tuple of (edited PNG image bytes, revised prompt).
     :raises ValueError: If ``model`` is unknown or does not support editing.
     """
@@ -157,4 +192,7 @@ async def edit_image(
         model=model,
         prompt=prompt,
         image_b64=image_b64,
+        resolution=resolution,
+        aspect_ratio=aspect_ratio,
+        **kwargs,
     )

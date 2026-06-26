@@ -21,10 +21,12 @@ class BaseProvider(ABC):
         self,
         model: str,
         prompt: str,
-        width: int,
-        height: int,
+        width: int | None = None,
+        height: int | None = None,
         steps: int = None,
         guidance: float = None,
+        resolution: str | None = None,
+        aspect_ratio: str | None = None,
         **kwargs,
     ) -> tuple[bytes, str]:
         """Generate an image from a text prompt.
@@ -38,6 +40,8 @@ class BaseProvider(ABC):
         model: str,
         prompt: str,
         image_b64: str,
+        resolution: str | None = None,
+        aspect_ratio: str | None = None,
         **kwargs,
     ) -> tuple[bytes, str]:
         """Edit an existing image based on a text prompt.
@@ -68,6 +72,9 @@ class OpenAICompatProvider(CloudProvider):
 
     Communicates with any provider that implements the OpenAI chat/completions
     interface and returns images in the response (data URI, inlineData, or URL).
+
+    ``resolution`` and ``aspect_ratio`` are accepted for interface compatibility
+    but ignored — the upstream provider controls output dimensions.
 
     :param api_key: Bearer token. Falls back to ``API_KEY`` env var.
     :param base_url: Base URL. Falls back to ``CLOUD_API_BASE_URL`` env var.
@@ -153,13 +160,19 @@ class OpenAICompatProvider(CloudProvider):
         self,
         model: str,
         prompt: str,
-        width: int,
-        height: int,
+        width: int | None = None,
+        height: int | None = None,
         steps: int = None,
         guidance: float = None,
+        resolution: str | None = None,
+        aspect_ratio: str | None = None,
         **kwargs,
     ) -> tuple[bytes, str]:
-        """Text-to-image via OpenAI-compatible chat/completions."""
+        """Text-to-image via OpenAI-compatible chat/completions.
+
+        ``resolution``, ``aspect_ratio``, ``width``, and ``height`` are
+        accepted for interface compatibility but ignored.
+        """
         async with httpx.AsyncClient(timeout=120) as client:
             messages = [{"role": "user", "content": prompt}]
             data = await self._chat_completions(client, model, messages)
@@ -170,6 +183,8 @@ class OpenAICompatProvider(CloudProvider):
         model: str,
         prompt: str,
         image_b64: str,
+        resolution: str | None = None,
+        aspect_ratio: str | None = None,
         **kwargs,
     ) -> tuple[bytes, str]:
         """Image-to-image edit via OpenAI-compatible chat/completions."""
@@ -193,6 +208,11 @@ class OpenRouterProvider(CloudProvider):
 
     Uses ``POST /api/v1/images`` (not /chat/completions).
     Returns images as ``data[0].b64_json``.
+
+    Parameter priority for output dimensions:
+    1. ``resolution`` + ``aspect_ratio``  — forwarded directly to OpenRouter.
+    2. ``size`` (``WxH`` string)          — forwarded as-is; OpenRouter accepts it.
+    3. ``width`` + ``height``             — combined into ``WxH`` size string.
 
     Docs: https://openrouter.ai/docs/guides/overview/multimodal/image-generation
 
@@ -232,45 +252,72 @@ class OpenRouterProvider(CloudProvider):
         logger.info("openrouter: image received via b64_json")
         return base64.b64decode(b64), ""
 
+    def _build_size_payload(self
+        , resolution: str | None
+        , aspect_ratio: str | None
+        , size: str | None
+        , width: int | None
+        , height: int | None
+    ) -> dict:
+        """Resolve dimension params into OpenRouter payload keys.
+
+        Priority: resolution/aspect_ratio > size > width+height.
+        """
+        payload = {}
+        if resolution:
+            payload["resolution"] = resolution
+            if aspect_ratio:
+                payload["aspect_ratio"] = aspect_ratio
+        elif size:
+            payload["size"] = size
+        elif width and height:
+            payload["size"] = f"{width}x{height}"
+        elif aspect_ratio:
+            # aspect_ratio alone without resolution — pass it anyway
+            payload["aspect_ratio"] = aspect_ratio
+        return payload
+
     async def generate(
         self,
         model: str,
         prompt: str,
-        width: int = None,
-        height: int = None,
+        width: int | None = None,
+        height: int | None = None,
         steps: int = None,
         guidance: float = None,
-        size: str = None,
-        quality: str = None,
-        n: int = None,
+        resolution: str | None = None,
+        aspect_ratio: str | None = None,
+        size: str | None = None,
+        quality: str | None = None,
+        n: int | None = None,
         **kwargs,
     ) -> tuple[bytes, str]:
         """Text-to-image via OpenRouter /api/v1/images.
 
         :param model: OpenRouter model slug, e.g. ``openai/gpt-image-1``.
         :param prompt: Text prompt.
-        :param width: Optional width — combined with height into ``size`` if provided.
-        :param height: Optional height — combined with width into ``size`` if provided.
-        :param size: Explicit size string, e.g. ``"1024x1024"`` or ``"2K"``.
-                     Takes precedence over width/height.
+        :param resolution: Normalized tier — ``"512"``, ``"1K"``, ``"2K"``, ``"4K"``.
+                           Takes priority over ``size`` and ``width``/``height``.
+        :param aspect_ratio: Normalized ratio, e.g. ``"1:1"``, ``"16:9"``.
+                             Used alongside ``resolution``.
+        :param size: Pixel string ``"WxH"`` or tier string ``"2K"``.
+                     Used when ``resolution`` is not provided.
         :param quality: ``auto``, ``low``, ``medium``, or ``high``.
         :param n: Number of images to generate (1-10).
         :returns: A tuple of (PNG image bytes, revised_prompt).
         """
         payload: dict = {"model": model, "prompt": prompt}
-
-        resolved_size = size
-        if not resolved_size and width and height:
-            resolved_size = f"{width}x{height}"
-        if resolved_size:
-            payload["size"] = resolved_size
+        payload.update(self._build_size_payload(resolution, aspect_ratio, size, width, height))
 
         if quality:
             payload["quality"] = quality
         if n and n > 1:
             payload["n"] = n
 
-        logger.info(f"openrouter generate: model={model!r} size={resolved_size!r}")
+        logger.info(
+            f"openrouter generate: model={model!r} "
+            f"resolution={resolution!r} aspect_ratio={aspect_ratio!r} size={size!r}"
+        )
 
         async with httpx.AsyncClient(timeout=180) as client:
             resp = await client.post(
@@ -288,9 +335,11 @@ class OpenRouterProvider(CloudProvider):
         model: str,
         prompt: str,
         image_b64: str,
-        size: str = None,
-        quality: str = None,
-        n: int = None,
+        resolution: str | None = None,
+        aspect_ratio: str | None = None,
+        size: str | None = None,
+        quality: str | None = None,
+        n: int | None = None,
         **kwargs,
     ) -> tuple[bytes, str]:
         """Image-to-image edit via OpenRouter /api/v1/images with input_references.
@@ -307,14 +356,14 @@ class OpenRouterProvider(CloudProvider):
                 {"type": "image_url", "image_url": {"url": image_b64}}
             ],
         }
-        if size:
-            payload["size"] = size
+        payload.update(self._build_size_payload(resolution, aspect_ratio, size, None, None))
+
         if quality:
             payload["quality"] = quality
         if n and n > 1:
             payload["n"] = n
 
-        logger.info(f"openrouter edit: model={model!r}")
+        logger.info(f"openrouter edit: model={model!r} resolution={resolution!r}")
 
         async with httpx.AsyncClient(timeout=180) as client:
             resp = await client.post(
@@ -346,7 +395,7 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
     """
     providers: dict[str, Optional[BaseProvider]] = {}
 
-    # ── Local models ─────────────────────────────────────────────────────────
+    # ── Local models ────────────────────────────────────────────────────────
     local_default = os.getenv("LOCAL_MODEL", "flux-schnell")
     for model_name in os.getenv("LOCAL_MODELS", local_default).split(","):
         model_name = model_name.strip()
@@ -354,7 +403,7 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
             providers[model_name] = None
             logger.info(f"Registered local model: {model_name!r}")
 
-    # ── OpenAI-compat cloud provider ─────────────────────────────────────────
+    # ── OpenAI-compat cloud provider ────────────────────────────────────────
     api_key = os.getenv("API_KEY")
     base_url = os.getenv("CLOUD_API_BASE_URL", "").rstrip("/")
     if api_key and base_url:
@@ -367,7 +416,7 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
     elif api_key and not base_url:
         logger.warning("API_KEY set but CLOUD_API_BASE_URL missing — cloud models unavailable")
 
-    # ── OpenRouter provider ───────────────────────────────────────────────────
+    # ── OpenRouter provider ──────────────────────────────────────────────────
     or_key = os.getenv("OPENROUTER_API_KEY")
     if or_key:
         openrouter = OpenRouterProvider(api_key=or_key)

@@ -19,28 +19,70 @@ VALID_SIZES = set(
     if s.strip()
 )
 
+VALID_RESOLUTIONS = {"512", "1K", "2K", "4K"}
+
+
+def _resolve_size_params(
+    size: str | None,
+    resolution: str | None,
+    aspect_ratio: str | None,
+) -> tuple[str | None, str | None, int | None, int | None]:
+    """Validate and resolve size/resolution/aspect_ratio into canonical values.
+
+    Priority: resolution + aspect_ratio > size.
+
+    :returns: (resolved_resolution, resolved_aspect_ratio, width, height)
+              width/height are set only when size is used (local pipeline needs them).
+    :raises HTTPException 400: on invalid resolution or size value.
+    """
+    if resolution is not None:
+        if resolution not in VALID_RESOLUTIONS:
+            raise HTTPException(
+                400,
+                f"Invalid resolution {resolution!r}. Must be one of: {sorted(VALID_RESOLUTIONS)}"
+            )
+        # resolution wins — size is ignored
+        return resolution, aspect_ratio, None, None
+
+    if size is not None:
+        if size not in VALID_SIZES:
+            raise HTTPException(
+                400,
+                f"Invalid size {size!r}. Must be one of: {sorted(VALID_SIZES)}"
+            )
+        try:
+            w, h = map(int, size.split("x"))
+        except ValueError:
+            raise HTTPException(400, f"Malformed size {size!r}, expected WxH format")
+        return None, aspect_ratio, w, h
+
+    # Nothing provided — use default size
+    default = "1024x1024"
+    w, h = map(int, default.split("x"))
+    return None, aspect_ratio, w, h
+
 
 @router.post("/images/generations", response_model=ImageGenerationResponse)
 async def openai_generate(request: ImageGenerationRequest):
     """Generate an image from a text prompt via OpenAI-compatible API.
 
-    Validates size, n, and response_format parameters, then calls the
-    image generation service. Returns a base64-encoded image.
+    Accepts either ``resolution`` + ``aspect_ratio`` (OpenRouter normalized
+    parameters) or legacy ``size`` (pixel dimensions). When both are present,
+    ``resolution`` takes priority and ``size`` is ignored.
 
-    :param request: The image generation request containing model, prompt,
-        size, and optional tuning parameters.
+    :param request: ImageGenerationRequest with model, prompt, and size params.
     :returns: ImageGenerationResponse with a base64-encoded PNG image.
-    :raises HTTPException 400: If size is invalid, n != 1, or prompt is empty.
-    :raises HTTPException 400: If response_format is not 'b64_json' or 'url'.
+    :raises HTTPException 400: On invalid params or unknown model.
     :raises HTTPException 501: If response_format='url' is requested.
-    :raises HTTPException 500: If an unexpected error occurs during
-        image generation.
+    :raises HTTPException 500: On unexpected generation failure.
     """
-    logger.info(f"Received: model={request.model!r}, size={request.size!r}, "
-                f"n={request.n}, response_format={request.response_format!r}, "
-                f"prompt={request.prompt[:80]!r}")
-    if request.size not in VALID_SIZES:
-        raise HTTPException(400, f"size must be one of {VALID_SIZES}")
+    logger.info(
+        f"Received: model={request.model!r}, size={request.size!r}, "
+        f"resolution={request.resolution!r}, aspect_ratio={request.aspect_ratio!r}, "
+        f"n={request.n}, response_format={request.response_format!r}, "
+        f"prompt={request.prompt[:80]!r}"
+    )
+
     if request.n != 1:
         raise HTTPException(400, "Only n=1 is supported")
     if request.response_format not in ("b64_json", "url"):
@@ -48,7 +90,9 @@ async def openai_generate(request: ImageGenerationRequest):
     if request.response_format == "url":
         raise HTTPException(501, "response_format='url' is not implemented yet")
 
-    w, h = map(int, request.size.split("x"))
+    resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(
+        request.size, request.resolution, request.aspect_ratio
+    )
 
     try:
         img_bytes, revised_prompt = await generate_image(
@@ -58,6 +102,10 @@ async def openai_generate(request: ImageGenerationRequest):
             height=h,
             steps=DEFAULT_STEPS,
             guidance=DEFAULT_GUIDANCE,
+            resolution=resolved_resolution,
+            aspect_ratio=resolved_aspect_ratio,
+            quality=request.quality,
+            size=request.size if resolved_resolution is None else None,
         )
         b64 = base64.b64encode(img_bytes).decode()
         return ImageGenerationResponse(
@@ -76,28 +124,35 @@ async def openai_generate(request: ImageGenerationRequest):
 async def openai_edit(request: ImageEditRequest):
     """Edit an existing image based on a text prompt via OpenAI-compatible API.
 
-    Validates size and n parameters, then calls the image edit service.
-    Returns a base64-encoded edited image.
+    Accepts either ``resolution`` + ``aspect_ratio`` or legacy ``size``.
+    When both are present, ``resolution`` takes priority.
 
-    :param request: The image edit request containing model, prompt,
-        input image (base64), and size.
+    :param request: ImageEditRequest with model, prompt, input image, and size params.
     :returns: ImageGenerationResponse with a base64-encoded PNG image.
-    :raises HTTPException 400: If size is invalid or n != 1.
-    :raises HTTPException 500: If an unexpected error occurs during
-        image editing.
+    :raises HTTPException 400: On invalid params or unknown model.
+    :raises HTTPException 500: On unexpected edit failure.
     """
-    logger.info(f"Edit: model={request.model!r}, size={request.size!r}, "
-                f"prompt={request.prompt[:80]!r}")
+    logger.info(
+        f"Edit: model={request.model!r}, size={request.size!r}, "
+        f"resolution={request.resolution!r}, aspect_ratio={request.aspect_ratio!r}, "
+        f"prompt={request.prompt[:80]!r}"
+    )
+
     if request.n != 1:
         raise HTTPException(400, "Only n=1 is supported")
-    if request.size not in VALID_SIZES:
-        raise HTTPException(400, f"size must be one of {VALID_SIZES}")
+
+    resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(
+        request.size, request.resolution, request.aspect_ratio
+    )
 
     try:
         img_bytes, revised_prompt = await edit_image(
             model=request.model,
             prompt=request.prompt,
             image_b64=request.image,
+            resolution=resolved_resolution,
+            aspect_ratio=resolved_aspect_ratio,
+            size=request.size if resolved_resolution is None else None,
         )
         b64 = base64.b64encode(img_bytes).decode()
         return ImageGenerationResponse(
