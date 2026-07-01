@@ -9,6 +9,7 @@ from functools import lru_cache
 from diffusers import FluxPipeline
 from PIL import Image
 import logging
+from typing import Optional
 
 from app.providers import PROVIDERS
 
@@ -186,6 +187,7 @@ async def edit_image(
     model: str,
     prompt: str,
     image_b64: str,
+    size: Optional[str] = None,
     resolution: str | None = None,
     aspect_ratio: str | None = None,
     **kwargs,
@@ -198,6 +200,7 @@ async def edit_image(
     :param model: The model identifier to look up in the provider registry.
     :param prompt: The text prompt describing the desired edit.
     :param image_b64: Base64-encoded input image.
+    :param size: Optional size string (e.g. ``"1024x1024"`` or resolution tier).
     :param resolution: OpenRouter resolution tier.
     :param aspect_ratio: OpenRouter aspect ratio string.
     :returns: A tuple of (edited PNG image bytes, revised prompt).
@@ -212,6 +215,7 @@ async def edit_image(
         model=model,
         prompt=prompt,
         image_b64=image_b64,
+        size=size,
         resolution=resolution,
         aspect_ratio=aspect_ratio,
         **kwargs,

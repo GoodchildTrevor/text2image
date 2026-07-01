@@ -2,8 +2,9 @@ import base64
 import time
 import logging
 import os
-from fastapi import APIRouter, HTTPException
-from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject, ImageEditRequest
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Form, UploadFile, File
+from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject
 from app.service import generate_image, edit_image, save_image_bytes
 
 logger = logging.getLogger(__name__)
@@ -148,42 +149,51 @@ async def openai_generate(request: ImageGenerationRequest):
 
 
 @router.post("/images/edits", response_model=ImageGenerationResponse)
-async def openai_edit(request: ImageEditRequest):
+async def openai_edit(
+    prompt: str = Form(...),
+    image: UploadFile = File(...),
+    model: Optional[str] = Form(default=None),
+    n: int = Form(default=1),
+    size: Optional[str] = Form(default=None),
+    response_format: str = Form(default="b64_json"),
+):
     """Edit an existing image based on a text prompt via OpenAI-compatible API.
 
-    Accepts either ``resolution`` + ``aspect_ratio`` or legacy ``size``.
-    When both are present, ``resolution`` takes priority.
-    When ``size`` is a resolution tier (e.g. ``"4K"``), it is promoted
-    to ``resolution`` automatically.
+    Accepts multipart/form-data with the image as a file upload.
+    When ``size`` is a resolution tier (e.g. ``"4K"``), it is forwarded
+    to the provider as-is.
 
-    :param request: ImageEditRequest with model, prompt, input image, and size params.
     :returns: ImageGenerationResponse with image as b64_json or url.
     :raises HTTPException 400: On invalid params or unknown model.
     :raises HTTPException 500: On unexpected edit failure.
     """
-    logger.info(
-        f"Edit: model={request.model!r}, size={request.size!r}, "
-        f"resolution={request.resolution!r}, aspect_ratio={request.aspect_ratio!r}, "
-        f"prompt={request.prompt[:80]!r}"
-    )
+    if model is None:
+        model = os.getenv("LOCAL_MODEL", "black-forest-labs/FLUX.1-schnell")
 
-    if request.n != 1:
+    logger.info(f"Edit: model={model!r}, size={size!r}, prompt={prompt[:80]!r}")
+
+    if n != 1:
         raise HTTPException(400, "Only n=1 is supported")
+    if response_format not in ("b64_json", "url"):
+        raise HTTPException(400, "response_format must be 'b64_json' or 'url'")
+    if response_format == "url":
+        raise HTTPException(501, "response_format='url' is not implemented yet")
 
-    resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(
-        request.size, request.resolution, request.aspect_ratio
-    )
+    raw = await image.read()
+    image_b64 = base64.b64encode(raw).decode()
 
     try:
         img_bytes, revised_prompt = await edit_image(
-            model=request.model,
-            prompt=request.prompt,
-            image_b64=request.image,
-            resolution=resolved_resolution,
-            aspect_ratio=resolved_aspect_ratio,
-            size=request.size if resolved_resolution is None else None,
+            model=model,
+            prompt=prompt,
+            image_b64=image_b64,
+            size=size,
         )
-        return _make_response(img_bytes, revised_prompt, request.response_format)
+        b64 = base64.b64encode(img_bytes).decode()
+        return ImageGenerationResponse(
+            created=int(time.time()),
+            data=[ImageObject(b64_json=b64, revised_prompt=revised_prompt)]
+        )
     except ValueError as e:
         logger.error(f"ValueError in edit_image: {e}")
         raise HTTPException(400, str(e))
