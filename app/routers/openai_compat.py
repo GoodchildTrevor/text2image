@@ -3,8 +3,9 @@ import time
 import logging
 import os
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Form, UploadFile, File
-from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject
+import httpx
+from fastapi import APIRouter, HTTPException, Request
+from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject, ImageEditRequest
 from app.service import generate_image, edit_image, save_image_bytes
 
 logger = logging.getLogger(__name__)
@@ -12,6 +13,10 @@ router = APIRouter(prefix="/v1")
 
 DEFAULT_STEPS = int(os.getenv("FLUX_DEFAULT_STEPS", "4"))
 DEFAULT_GUIDANCE = float(os.getenv("FLUX_DEFAULT_GUIDANCE", "1.0"))
+
+# Base URL of the OpenWebUI instance, used to resolve internal file paths like
+# /api/v1/files/<id>/content that OpenWebUI sends in image_urls.
+OWUI_BASE_URL = os.getenv("OWUI_BASE_URL", "http://open-webui:8080")
 
 _default_sizes = "1024x1024,864x1184,1184x864,768x1344,1344x768"
 VALID_SIZES = set(
@@ -32,15 +37,9 @@ def _resolve_size_params(
 
     Priority: resolution > size-as-resolution > size-as-pixels.
 
-    If ``size`` matches a known resolution tier (e.g. ``"4K"``) it is
-    transparently promoted to ``resolution`` so OpenRouter receives the
-    correct parameter regardless of which field the caller used.
-
     :returns: (resolved_resolution, resolved_aspect_ratio, width, height)
-              width/height are set only when size is a pixel string.
     :raises HTTPException 400: on invalid resolution or size value.
     """
-    # Explicit resolution field always wins
     if resolution is not None:
         if resolution not in VALID_RESOLUTIONS:
             raise HTTPException(
@@ -50,7 +49,6 @@ def _resolve_size_params(
         return resolution, aspect_ratio, None, None
 
     if size is not None:
-        # Treat resolution tiers passed via the `size` field (e.g. OpenWebUI quirk)
         if size in VALID_RESOLUTIONS:
             logger.info(f"size={size!r} promoted to resolution tier")
             return size, aspect_ratio, None, None
@@ -67,21 +65,11 @@ def _resolve_size_params(
             raise HTTPException(400, f"Malformed size {size!r}, expected WxH format")
         return None, aspect_ratio, w, h
 
-    # Nothing provided — default 1024x1024
     return None, aspect_ratio, 1024, 1024
 
 
 def _make_response(img_bytes: bytes, revised_prompt: str, response_format: str) -> ImageGenerationResponse:
-    """Build ImageGenerationResponse from raw bytes.
-
-    When ``response_format`` is ``"url"``, the image is saved to disk and
-    a public URL is returned. Otherwise base64-encodes the bytes.
-
-    :param img_bytes: Raw PNG image bytes.
-    :param revised_prompt: The prompt used/revised by the provider.
-    :param response_format: ``"b64_json"`` or ``"url"``.
-    :returns: :class:`ImageGenerationResponse` with one item.
-    """
+    """Build ImageGenerationResponse from raw bytes."""
     if response_format == "url":
         url = save_image_bytes(img_bytes)
         return ImageGenerationResponse(
@@ -95,21 +83,52 @@ def _make_response(img_bytes: bytes, revised_prompt: str, response_format: str) 
     )
 
 
+async def _resolve_image_b64(request: ImageEditRequest, authorization: Optional[str]) -> str:
+    """Resolve image bytes to base64 from either `image` or `image_urls`.
+
+    Handles three cases:
+    1. ``request.image`` is already a base64 string — use as-is.
+    2. ``request.image_urls`` contains an absolute URL — fetch directly.
+    3. ``request.image_urls`` contains an internal OWUI path like
+       ``/api/v1/files/<id>/content`` — prepend OWUI_BASE_URL and fetch
+       with the forwarded Authorization header.
+
+    :raises HTTPException 400: if neither field is provided or fetch fails.
+    """
+    if request.image:
+        return request.image
+
+    if request.image_urls:
+        url = request.image_urls[0]
+        # Resolve relative paths to absolute OWUI URL
+        if url.startswith("/"):
+            url = f"{OWUI_BASE_URL.rstrip('/')}{url}"
+            logger.info(f"Resolving OWUI internal image path → {url}")
+        else:
+            logger.info(f"Fetching image from URL: {url}")
+
+        headers = {}
+        if authorization:
+            headers["Authorization"] = authorization
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                return base64.b64encode(resp.content).decode()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to fetch image from {url}: {e.response.status_code}")
+            raise HTTPException(400, f"Could not fetch image from {url}: HTTP {e.response.status_code}")
+        except Exception as e:
+            logger.error(f"Failed to fetch image from {url}: {e}")
+            raise HTTPException(400, f"Could not fetch image: {e}")
+
+    raise HTTPException(400, "Either 'image' or 'image_urls' must be provided")
+
+
 @router.post("/images/generations", response_model=ImageGenerationResponse)
 async def openai_generate(request: ImageGenerationRequest):
-    """Generate an image from a text prompt via OpenAI-compatible API.
-
-    Accepts either ``resolution`` + ``aspect_ratio`` (OpenRouter normalized
-    parameters) or legacy ``size`` (pixel dimensions or tier string).
-    When both are present, ``resolution`` takes priority and ``size`` is ignored.
-    When ``size`` is a resolution tier (e.g. ``"4K"``), it is promoted
-    to ``resolution`` automatically.
-
-    :param request: ImageGenerationRequest with model, prompt, and size params.
-    :returns: ImageGenerationResponse with image as b64_json or url.
-    :raises HTTPException 400: On invalid params or unknown model.
-    :raises HTTPException 500: On unexpected generation failure.
-    """
+    """Generate an image from a text prompt via OpenAI-compatible API."""
     logger.info(
         f"Received: model={request.model!r}, size={request.size!r}, "
         f"resolution={request.resolution!r}, aspect_ratio={request.aspect_ratio!r}, "
@@ -149,51 +168,46 @@ async def openai_generate(request: ImageGenerationRequest):
 
 
 @router.post("/images/edits", response_model=ImageGenerationResponse)
-async def openai_edit(
-    prompt: str = Form(...),
-    image: UploadFile = File(...),
-    model: Optional[str] = Form(default=None),
-    n: int = Form(default=1),
-    size: Optional[str] = Form(default=None),
-    response_format: str = Form(default="b64_json"),
-):
+async def openai_edit(request: ImageEditRequest, raw_request: Request):
     """Edit an existing image based on a text prompt via OpenAI-compatible API.
 
-    Accepts multipart/form-data with the image as a file upload.
-    When ``size`` is a resolution tier (e.g. ``"4K"``), it is forwarded
-    to the provider as-is.
+    Accepts JSON body with either:
+    - ``image``: base64-encoded image string (standard OpenAI format)
+    - ``image_urls``: list of URLs/paths (OpenWebUI format)
 
-    :returns: ImageGenerationResponse with image as b64_json or url.
-    :raises HTTPException 400: On invalid params or unknown model.
-    :raises HTTPException 500: On unexpected edit failure.
+    Internal OpenWebUI paths (``/api/v1/files/.../content``) are resolved
+    against ``OWUI_BASE_URL`` env var with the forwarded Authorization header.
     """
-    if model is None:
-        model = os.getenv("LOCAL_MODEL", "black-forest-labs/FLUX.1-schnell")
+    authorization = raw_request.headers.get("authorization")
 
-    logger.info(f"Edit: model={model!r}, size={size!r}, prompt={prompt[:80]!r}")
+    logger.info(
+        f"Edit: model={request.model!r}, size={request.size!r}, "
+        f"resolution={request.resolution!r}, aspect_ratio={request.aspect_ratio!r}, "
+        f"image_urls={request.image_urls!r}, has_image={bool(request.image)}, "
+        f"prompt={request.prompt[:80]!r}"
+    )
 
-    if n != 1:
+    if request.n != 1:
         raise HTTPException(400, "Only n=1 is supported")
-    if response_format not in ("b64_json", "url"):
+    if request.response_format not in ("b64_json", "url"):
         raise HTTPException(400, "response_format must be 'b64_json' or 'url'")
-    if response_format == "url":
-        raise HTTPException(501, "response_format='url' is not implemented yet")
 
-    raw = await image.read()
-    image_b64 = base64.b64encode(raw).decode()
+    image_b64 = await _resolve_image_b64(request, authorization)
+
+    resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(
+        request.size, request.resolution, request.aspect_ratio
+    )
 
     try:
         img_bytes, revised_prompt = await edit_image(
-            model=model,
-            prompt=prompt,
+            model=request.model,
+            prompt=request.prompt,
             image_b64=image_b64,
-            size=size,
+            size=request.size if resolved_resolution is None else None,
+            resolution=resolved_resolution,
+            aspect_ratio=resolved_aspect_ratio,
         )
-        b64 = base64.b64encode(img_bytes).decode()
-        return ImageGenerationResponse(
-            created=int(time.time()),
-            data=[ImageObject(b64_json=b64, revised_prompt=revised_prompt)]
-        )
+        return _make_response(img_bytes, revised_prompt, request.response_format)
     except ValueError as e:
         logger.error(f"ValueError in edit_image: {e}")
         raise HTTPException(400, str(e))

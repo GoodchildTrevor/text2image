@@ -37,7 +37,8 @@ class ImageEditRequest(BaseModel):
         default_factory=lambda: os.getenv("LOCAL_MODEL", "black-forest-labs/FLUX.1-schnell")
     )
     prompt: str
-    image: str  # base64-encoded input image or URL
+    image: Optional[str] = None        # base64-encoded input image (standard OpenAI format)
+    image_urls: Optional[list[str]] = None  # OpenWebUI format: internal file paths or URLs
     n: int = 1
     size: Optional[str] = None
     resolution: Optional[str] = None
