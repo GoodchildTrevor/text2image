@@ -2,10 +2,10 @@ import base64
 import time
 import logging
 import os
-from typing import Optional, Annotated, List
+from typing import Optional
 import httpx
-from fastapi import APIRouter, HTTPException, Header, Form, UploadFile, File, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Request
+from starlette.datastructures import UploadFile
 from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject
 from app.service import generate_image, edit_image, save_image_bytes
 
@@ -114,25 +114,24 @@ async def openai_generate(request: ImageGenerationRequest):
         raise HTTPException(500, "Image generation failed")
 
 
-@router.post("/images/edits", response_model=ImageGenerationResponse)
-async def openai_edit(
-    request: Request,
-    prompt: str = Form(...),
-    model: Optional[str] = Form(default=None),
-    n: int = Form(default=1),
-    size: Optional[str] = Form(default=None),
-    response_format: str = Form(default="b64_json"),
-    # Standard OpenAI field name
-    image: Optional[UploadFile] = File(default=None),
-    # OpenWebUI sends field named "image[]"
-    image_list: Optional[List[UploadFile]] = File(default=None, alias="image[]"),
-):
+@router.post("/images/edits")
+async def openai_edit(request: Request):
     """Edit an existing image via multipart/form-data.
 
-    Accepts both ``image`` (standard OpenAI) and ``image[]`` (OpenWebUI) field names.
+    Parses the form manually to support both ``image`` (standard OpenAI)
+    and ``image[]`` (OpenWebUI) field names, as FastAPI's File/alias
+    mechanism does not support bracket-notation field names.
     """
-    if model is None:
-        model = os.getenv("LOCAL_MODEL", "black-forest-labs/FLUX.1-schnell")
+    form = await request.form()
+
+    prompt = form.get("prompt")
+    if not prompt:
+        raise HTTPException(400, "Field 'prompt' is required")
+
+    model = form.get("model") or os.getenv("LOCAL_MODEL", "black-forest-labs/FLUX.1-schnell")
+    n = int(form.get("n", 1))
+    size = form.get("size") or None
+    response_format = form.get("response_format") or "b64_json"
 
     logger.info(f"Edit: model={model!r}, size={size!r}, prompt={prompt[:80]!r}")
 
@@ -141,29 +140,21 @@ async def openai_edit(
     if response_format not in ("b64_json", "url"):
         raise HTTPException(400, "response_format must be 'b64_json' or 'url'")
 
-    # Resolve image file: prefer `image`, fall back to `image[]`
-    image_file: Optional[UploadFile] = image
-    if image_file is None and image_list:
-        image_file = image_list[0]
-
-    # Last resort: parse form manually to catch any other field name variants
-    if image_file is None:
-        form = await request.form()
-        for key, val in form.multi_items():
-            if isinstance(val, UploadFile):
-                image_file = val
-                logger.info(f"Edit: found image under unexpected field name {key!r}")
-                break
+    # Find image file under any field name (image, image[], etc.)
+    image_file: Optional[UploadFile] = None
+    for key, val in form.multi_items():
+        if isinstance(val, UploadFile):
+            image_file = val
+            logger.info(f"Edit: image field name={key!r}, filename={val.filename!r}")
+            break
 
     if image_file is None:
-        raise HTTPException(400, "No image file provided (expected field 'image' or 'image[]')")
+        raise HTTPException(400, "No image file provided")
 
     raw = await image_file.read()
     image_b64 = base64.b64encode(raw).decode()
 
-    resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(
-        size, None, None
-    )
+    resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(size, None, None)
 
     try:
         img_bytes, revised_prompt = await edit_image(
