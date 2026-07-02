@@ -3,8 +3,7 @@ import pathlib
 import torch
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from app.routers.direct_image import router as direct_router
 from app.routers.openai_compat import router as openai_router
@@ -23,8 +22,6 @@ logging.basicConfig(
     ]
 )
 
-logger = logging.getLogger(__name__)
-
 IMAGES_DIR = pathlib.Path("/app/static/images")
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -39,18 +36,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="imgen API", lifespan=lifespan)
-
-
-@app.middleware("http")
-async def log_edits_request(request: Request, call_next):
-    """Temporarily log raw body of /v1/images/edits for debugging."""
-    if request.url.path == "/v1/images/edits":
-        body = await request.body()
-        ct = request.headers.get("content-type", "<none>")
-        logger.info(f"[DEBUG edits] content-type: {ct}")
-        logger.info(f"[DEBUG edits] body[:1000]: {body[:1000]}")
-    return await call_next(request)
-
 
 # Serve generated images: GET /images/{filename}
 app.mount("/images", StaticFiles(directory="/app/static/images"), name="images")
