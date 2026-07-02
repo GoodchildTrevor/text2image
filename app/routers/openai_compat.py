@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Optional
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Header
 from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject, ImageEditRequest
 from app.service import generate_image, edit_image, save_image_bytes
 
@@ -84,26 +84,23 @@ def _make_response(img_bytes: bytes, revised_prompt: str, response_format: str) 
 
 
 async def _resolve_image_b64(request: ImageEditRequest, authorization: Optional[str]) -> str:
-    """Resolve image bytes to base64 from either `image` or `image_urls`.
+    """Resolve image to base64 from either `image` or `image_urls`.
 
-    Handles three cases:
-    1. ``request.image`` is already a base64 string — use as-is.
-    2. ``request.image_urls`` contains an absolute URL — fetch directly.
-    3. ``request.image_urls`` contains an internal OWUI path like
-       ``/api/v1/files/<id>/content`` — prepend OWUI_BASE_URL and fetch
-       with the forwarded Authorization header.
+    1. ``request.image`` — base64 string, use as-is.
+    2. ``request.image_urls[0]`` starts with ``/`` — internal OWUI path,
+       prepend OWUI_BASE_URL and fetch with forwarded Authorization header.
+    3. ``request.image_urls[0]`` — absolute URL, fetch directly.
 
-    :raises HTTPException 400: if neither field is provided or fetch fails.
+    :raises HTTPException 400: if neither field provided or fetch fails.
     """
     if request.image:
         return request.image
 
     if request.image_urls:
         url = request.image_urls[0]
-        # Resolve relative paths to absolute OWUI URL
         if url.startswith("/"):
             url = f"{OWUI_BASE_URL.rstrip('/')}{url}"
-            logger.info(f"Resolving OWUI internal image path → {url}")
+            logger.info(f"Resolving OWUI internal image path -> {url}")
         else:
             logger.info(f"Fetching image from URL: {url}")
 
@@ -117,7 +114,7 @@ async def _resolve_image_b64(request: ImageEditRequest, authorization: Optional[
                 resp.raise_for_status()
                 return base64.b64encode(resp.content).decode()
         except httpx.HTTPStatusError as e:
-            logger.error(f"Failed to fetch image from {url}: {e.response.status_code}")
+            logger.error(f"Failed to fetch image from {url}: HTTP {e.response.status_code}")
             raise HTTPException(400, f"Could not fetch image from {url}: HTTP {e.response.status_code}")
         except Exception as e:
             logger.error(f"Failed to fetch image from {url}: {e}")
@@ -168,7 +165,10 @@ async def openai_generate(request: ImageGenerationRequest):
 
 
 @router.post("/images/edits", response_model=ImageGenerationResponse)
-async def openai_edit(request: ImageEditRequest, raw_request: Request):
+async def openai_edit(
+    request: ImageEditRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     """Edit an existing image based on a text prompt via OpenAI-compatible API.
 
     Accepts JSON body with either:
@@ -178,8 +178,6 @@ async def openai_edit(request: ImageEditRequest, raw_request: Request):
     Internal OpenWebUI paths (``/api/v1/files/.../content``) are resolved
     against ``OWUI_BASE_URL`` env var with the forwarded Authorization header.
     """
-    authorization = raw_request.headers.get("authorization")
-
     logger.info(
         f"Edit: model={request.model!r}, size={request.size!r}, "
         f"resolution={request.resolution!r}, aspect_ratio={request.aspect_ratio!r}, "
