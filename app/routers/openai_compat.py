@@ -3,9 +3,18 @@ import time
 import logging
 import os
 from typing import Optional
+
 import httpx
-from fastapi import APIRouter, HTTPException, Request
-from app.config import ImageGenerationRequest, ImageEditRequest, ImageGenerationResponse, ImageObject
+from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
+from pydantic import ValidationError
+
+from app.config import (
+    ImageGenerationRequest,
+    ImageEditRequest,
+    ImageGenerationResponse,
+    ImageObject,
+)
 from app.service import generate_image, edit_image, save_image_bytes
 
 logger = logging.getLogger(__name__)
@@ -71,6 +80,67 @@ def _make_response(img_bytes: bytes, revised_prompt: str, response_format: str) 
     )
 
 
+def _to_data_url(raw: bytes, mime: str | None) -> str:
+    mime = (mime or "image/png").split(";")[0].strip()
+    b64 = base64.b64encode(raw).decode()
+    return f"data:{mime};base64,{b64}"
+
+
+async def _parse_edit_request(http_request: Request) -> ImageEditRequest:
+    """Parse /v1/images/edits body as JSON or multipart/form-data.
+
+    - application/json  → use ImageEditRequest Pydantic model directly
+    - multipart/form-data → read form fields + UploadFile, build equivalent payload
+    """
+    content_type = (http_request.headers.get("content-type") or "").lower()
+
+    try:
+        if "application/json" in content_type:
+            payload = await http_request.json()
+            return ImageEditRequest.model_validate(payload)
+
+        if "multipart/form-data" in content_type:
+            form = await http_request.form()
+            image_part = form.get("image")
+            image_value: str | None = None
+
+            if isinstance(image_part, UploadFile):
+                raw = await image_part.read()
+                if not raw:
+                    raise HTTPException(400, "Uploaded image file is empty")
+                image_value = _to_data_url(raw, image_part.content_type)
+            elif isinstance(image_part, str) and image_part:
+                # Already a base64 string or data URL sent as form field
+                image_value = image_part
+            elif image_part is not None:
+                raise HTTPException(400, "Field 'image' must be a file upload or base64 string")
+
+            raw_payload: dict = {
+                "prompt": form.get("prompt"),
+                "image": image_value,
+                "n": int(form.get("n") or 1),
+                "response_format": form.get("response_format") or "b64_json",
+            }
+            # Optional fields — only include if present to let model defaults apply
+            for field in ("model", "size", "resolution", "aspect_ratio", "quality"):
+                val = form.get(field)
+                if val is not None:
+                    raw_payload[field] = val
+
+            return ImageEditRequest.model_validate(raw_payload)
+
+        raise HTTPException(
+            415,
+            f"Unsupported Content-Type for /v1/images/edits: {content_type!r}. "
+            "Use 'application/json' or 'multipart/form-data'."
+        )
+
+    except HTTPException:
+        raise
+    except ValidationError as e:
+        raise RequestValidationError(e.errors()) from e
+
+
 @router.post("/images/generations", response_model=ImageGenerationResponse)
 async def openai_generate(request: ImageGenerationRequest):
     logger.info(
@@ -112,20 +182,9 @@ async def openai_generate(request: ImageGenerationRequest):
 
 
 @router.post("/images/edits", response_model=ImageGenerationResponse)
-async def openai_edit(request: ImageEditRequest):
-    """Edit an image. Accepts JSON with image as base64 string in `image` field.
+async def openai_edit(http_request: Request):
+    request = await _parse_edit_request(http_request)
 
-    Expected payload::
-
-        {
-            "model": "...",
-            "prompt": "...",
-            "image": "<base64-encoded PNG, optionally with data:image/...;base64, prefix>",
-            "resolution": "1K",
-            "aspect_ratio": "1:1",
-            "response_format": "url"
-        }
-    """
     img_info = f"<b64 len={len(request.image)}>" if request.image else "None"
     logger.info(
         f"Edit: model={request.model!r}, size={request.size!r}, "
@@ -138,7 +197,7 @@ async def openai_edit(request: ImageEditRequest):
     if request.response_format not in ("b64_json", "url"):
         raise HTTPException(400, "response_format must be 'b64_json' or 'url'")
     if not request.image:
-        raise HTTPException(400, "Field 'image' (base64) is required for edits")
+        raise HTTPException(400, "Field 'image' (file upload or base64) is required for edits")
 
     resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(
         request.size, request.resolution, request.aspect_ratio
@@ -154,6 +213,7 @@ async def openai_edit(request: ImageEditRequest):
             aspect_ratio=resolved_aspect_ratio,
         )
         return _make_response(img_bytes, revised_prompt, request.response_format)
+
     except httpx.HTTPStatusError as e:
         status = e.response.status_code
         try:
