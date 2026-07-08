@@ -15,51 +15,14 @@ logger = logging.getLogger(__name__)
 
 
 class BaseProvider(ABC):
-    """Abstract base class for image generation providers."""
+    @abstractmethod
+    async def generate(self, model: str, prompt: str, **kwargs) -> tuple[bytes, str]: ...
 
     @abstractmethod
-    async def generate(
-        self,
-        model: str,
-        prompt: str,
-        width: int | None = None,
-        height: int | None = None,
-        steps: int = None,
-        guidance: float = None,
-        resolution: str | None = None,
-        aspect_ratio: str | None = None,
-        **kwargs,
-    ) -> tuple[bytes, str]:
-        """Generate an image from a text prompt.
-
-        :returns: A tuple of (image_bytes, revised_prompt).
-        """
-
-    @abstractmethod
-    async def edit(
-        self,
-        model: str,
-        prompt: str,
-        image_b64: str,
-        resolution: str | None = None,
-        aspect_ratio: str | None = None,
-        **kwargs,
-    ) -> tuple[bytes, str]:
-        """Edit an existing image based on a text prompt.
-
-        :returns: A tuple of (image_bytes, revised_prompt).
-        """
+    async def edit(self, model: str, prompt: str, image_b64: str, **kwargs) -> tuple[bytes, str]: ...
 
 
 class CloudProvider(BaseProvider, ABC):
-    """Abstract base for cloud image providers.
-
-    Handles common auth and HTTP plumbing shared by all cloud backends.
-
-    :param api_key: Bearer token for the provider API.
-    :param base_url: Base URL of the provider endpoint (trailing slash stripped).
-    """
-
     def __init__(self, api_key: str, base_url: str):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -69,12 +32,7 @@ class CloudProvider(BaseProvider, ABC):
 
 
 class FallbackProvider(BaseProvider):
-    """Wraps two providers: tries ``primary`` first, falls back to ``secondary``
-    on any HTTP error (4xx/5xx) or connection failure.
-
-    :param primary: Provider to try first.
-    :param secondary: Provider to use when primary fails.
-    """
+    """Tries ``primary``, falls back to ``secondary`` on any HTTP/network error."""
 
     def __init__(self, primary: BaseProvider, secondary: BaseProvider):
         self.primary = primary
@@ -87,8 +45,8 @@ class FallbackProvider(BaseProvider):
             return result
         except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException, ValueError) as e:
             logger.warning(
-                f"FallbackProvider.generate: primary failed for model={model!r} ({type(e).__name__}: {e}), "
-                f"switching to secondary"
+                f"FallbackProvider.generate: primary failed for model={model!r} "
+                f"({type(e).__name__}: {e}), switching to secondary"
             )
             return await self.secondary.generate(model=model, prompt=prompt, **kwargs)
 
@@ -99,24 +57,14 @@ class FallbackProvider(BaseProvider):
             return result
         except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException, ValueError) as e:
             logger.warning(
-                f"FallbackProvider.edit: primary failed for model={model!r} ({type(e).__name__}: {e}), "
-                f"switching to secondary"
+                f"FallbackProvider.edit: primary failed for model={model!r} "
+                f"({type(e).__name__}: {e}), switching to secondary"
             )
             return await self.secondary.edit(model=model, prompt=prompt, image_b64=image_b64, **kwargs)
 
 
 class OpenAICompatProvider(CloudProvider):
-    """Image generation and editing via an OpenAI-compatible /chat/completions API.
-
-    Communicates with any provider that implements the OpenAI chat/completions
-    interface and returns images in the response (data URI, inlineData, or URL).
-
-    ``resolution`` and ``aspect_ratio`` are accepted for interface compatibility
-    but ignored — the upstream provider controls output dimensions.
-
-    :param api_key: Bearer token. Falls back to ``API_KEY`` env var.
-    :param base_url: Base URL. Falls back to ``CLOUD_API_BASE_URL`` env var.
-    """
+    """Image generation and editing via an OpenAI-compatible /chat/completions API."""
 
     def __init__(self, api_key: str = None, base_url: str = None):
         super().__init__(
@@ -125,18 +73,6 @@ class OpenAICompatProvider(CloudProvider):
         )
 
     def _parse_response(self, data: dict) -> tuple[bytes, str]:
-        """Parse an OpenAI-compatible chat/completions response and extract image bytes.
-
-        Handles all known image response formats:
-        - ``message.images[].image_url.url`` — data URI or HTTP URL
-        - ``message.parts[].inlineData`` — Gemini-style base64
-        - ``message.parts[].fileData.fileUri``
-        - ``message.content`` — plain data URI or HTTP URL
-
-        :param data: The JSON response dict from the chat/completions endpoint.
-        :returns: A tuple of (image_bytes, text_content).
-        :raises ValueError: If no image is found in the response.
-        """
         message = data["choices"][0]["message"]
         content = message.get("content")
         parts = message.get("parts") or []
@@ -149,7 +85,7 @@ class OpenAICompatProvider(CloudProvider):
                 b64 = re.sub(r"^data:image/.+;base64,", "", url)
                 return base64.b64decode(b64), content or ""
             if url.startswith("http"):
-                raise ValueError("HTTP image URL in message.images is not supported in _parse_response")
+                raise ValueError("HTTP image URL in message.images is not supported")
 
         for part in parts:
             if not isinstance(part, dict):
@@ -181,9 +117,7 @@ class OpenAICompatProvider(CloudProvider):
             f"content preview: {str(content)[:100]}"
         )
 
-    async def _chat_completions(
-        self, client: httpx.AsyncClient, model: str, messages: list
-    ) -> dict:
+    async def _chat_completions(self, client: httpx.AsyncClient, model: str, messages: list) -> dict:
         resp = await client.post(
             f"{self.base_url}/chat/completions",
             headers=self._auth_headers(),
@@ -195,40 +129,23 @@ class OpenAICompatProvider(CloudProvider):
         return data
 
     async def generate(
-        self,
-        model: str,
-        prompt: str,
-        width: int | None = None,
-        height: int | None = None,
-        steps: int = None,
-        guidance: float = None,
-        resolution: str | None = None,
-        aspect_ratio: str | None = None,
+        self, model: str, prompt: str,
+        width: int | None = None, height: int | None = None,
+        steps: int = None, guidance: float = None,
+        resolution: str | None = None, aspect_ratio: str | None = None,
         **kwargs,
     ) -> tuple[bytes, str]:
-        """Text-to-image via OpenAI-compatible chat/completions.
-
-        ``resolution``, ``aspect_ratio``, ``width``, and ``height`` are
-        accepted for interface compatibility but ignored.
-        """
         async with httpx.AsyncClient(timeout=120) as client:
-            messages = [{"role": "user", "content": prompt}]
-            data = await self._chat_completions(client, model, messages)
+            data = await self._chat_completions(client, model, [{"role": "user", "content": prompt}])
             return self._parse_response(data)
 
     async def edit(
-        self,
-        model: str,
-        prompt: str,
-        image_b64: str,
-        resolution: str | None = None,
-        aspect_ratio: str | None = None,
+        self, model: str, prompt: str, image_b64: str,
+        resolution: str | None = None, aspect_ratio: str | None = None,
         **kwargs,
     ) -> tuple[bytes, str]:
-        """Image-to-image edit via OpenAI-compatible chat/completions."""
         if not image_b64.startswith("data:"):
             image_b64 = f"data:image/png;base64,{image_b64}"
-
         async with httpx.AsyncClient(timeout=120) as client:
             messages = [{
                 "role": "user",
@@ -242,74 +159,44 @@ class OpenAICompatProvider(CloudProvider):
 
 
 class OpenRouterProvider(CloudProvider):
-    """Image generation and editing via an OpenRouter-compatible Image API.
+    """Image generation and editing via an OpenRouter-compatible /api/v1/images endpoint.
 
-    Uses ``POST /api/v1/images`` (not /chat/completions).
-    Returns images as ``data[0].b64_json``.
-
-    Parameter priority for output dimensions:
-    1. ``size`` (``WxH`` string) — clamped via ``openrouter_caps.clamp_size()``.
-    2. ``width`` + ``height``    — combined into ``WxH``, then clamped.
-    3. ``resolution`` + ``aspect_ratio`` — forwarded directly.
-
-    :param api_key: Bearer token. Falls back to ``OPENROUTER_API_KEY`` env var.
-    :param base_url: Base URL. Defaults to ``https://openrouter.ai``.
+    ``base_url`` is **required** — read from ``OPENROUTER_BASE_URL`` env var.
+    No hardcoded URL.
     """
 
-    OPENROUTER_BASE = "https://openrouter.ai"
-
     def __init__(self, api_key: str = None, base_url: str = None):
+        resolved_url = base_url or os.getenv("OPENROUTER_BASE_URL", "").rstrip("/")
+        if not resolved_url:
+            raise ValueError(
+                "OpenRouterProvider requires OPENROUTER_BASE_URL env var to be set. "
+                "Example: OPENROUTER_BASE_URL=https://routerai.ru"
+            )
         super().__init__(
             api_key=api_key or os.getenv("OPENROUTER_API_KEY", ""),
-            base_url=base_url or os.getenv("OPENROUTER_BASE_URL", self.OPENROUTER_BASE),
+            base_url=resolved_url,
         )
 
     def _parse_image_response(self, data: dict) -> tuple[bytes, str]:
-        """Parse OpenRouter /api/v1/images response.
-
-        Expected shape::
-
-            {
-                "created": 1748372400,
-                "data": [{"b64_json": "<base64>"}],
-                "usage": {...}
-            }
-
-        :param data: JSON response dict.
-        :returns: A tuple of (image_bytes, revised_prompt).
-        :raises ValueError: If ``data[0].b64_json`` is missing.
-        """
         items = data.get("data") or []
         if not items:
-            raise ValueError(f"OpenRouter returned empty data array: {json.dumps(data)[:300]}")
+            raise ValueError(f"Empty data array: {json.dumps(data)[:300]}")
         b64 = items[0].get("b64_json")
         if not b64:
-            raise ValueError(f"OpenRouter response missing b64_json: {json.dumps(items[0])[:300]}")
+            raise ValueError(f"Missing b64_json: {json.dumps(items[0])[:300]}")
         logger.info("openrouter: image received via b64_json")
         return base64.b64decode(b64), ""
 
     def _build_size_payload(
-        self,
-        model: str,
-        resolution: str | None,
-        aspect_ratio: str | None,
-        size: str | None,
-        width: int | None,
-        height: int | None,
+        self, model: str,
+        resolution: str | None, aspect_ratio: str | None,
+        size: str | None, width: int | None, height: int | None,
     ) -> dict:
-        """Resolve dimension params into OpenRouter payload keys.
-
-        Priority: size > width+height > resolution/aspect_ratio.
-        ``size`` and derived ``WxH`` strings are clamped via ``openrouter_caps``.
-        """
         payload = {}
         if size:
-            clamped = openrouter_caps.clamp_size(model, size)
-            payload["size"] = clamped
+            payload["size"] = openrouter_caps.clamp_size(model, size)
         elif width and height:
-            raw = f"{width}x{height}"
-            clamped = openrouter_caps.clamp_size(model, raw)
-            payload["size"] = clamped
+            payload["size"] = openrouter_caps.clamp_size(model, f"{width}x{height}")
         elif resolution:
             payload["resolution"] = resolution
             if aspect_ratio:
@@ -319,24 +206,15 @@ class OpenRouterProvider(CloudProvider):
         return payload
 
     async def generate(
-        self,
-        model: str,
-        prompt: str,
-        width: int | None = None,
-        height: int | None = None,
-        steps: int = None,
-        guidance: float = None,
-        resolution: str | None = None,
-        aspect_ratio: str | None = None,
-        size: str | None = None,
-        quality: str | None = None,
-        n: int | None = None,
-        **kwargs,
+        self, model: str, prompt: str,
+        width: int | None = None, height: int | None = None,
+        steps: int = None, guidance: float = None,
+        resolution: str | None = None, aspect_ratio: str | None = None,
+        size: str | None = None, quality: str | None = None,
+        n: int | None = None, **kwargs,
     ) -> tuple[bytes, str]:
         payload: dict = {"model": model, "prompt": prompt}
-        payload.update(
-            self._build_size_payload(model, resolution, aspect_ratio, size, width, height)
-        )
+        payload.update(self._build_size_payload(model, resolution, aspect_ratio, size, width, height))
         if quality:
             payload["quality"] = quality
         if n and n > 1:
@@ -365,21 +243,13 @@ class OpenRouterProvider(CloudProvider):
                     f"response={json.dumps(err_body, ensure_ascii=False)[:500]}"
                 )
             resp.raise_for_status()
-            data = resp.json()
-            logger.info(f"openrouter response keys: {list(data.keys())}")
-            return self._parse_image_response(data)
+            return self._parse_image_response(resp.json())
 
     async def edit(
-        self,
-        model: str,
-        prompt: str,
-        image_b64: str,
-        resolution: str | None = None,
-        aspect_ratio: str | None = None,
-        size: str | None = None,
-        quality: str | None = None,
-        n: int | None = None,
-        **kwargs,
+        self, model: str, prompt: str, image_b64: str,
+        resolution: str | None = None, aspect_ratio: str | None = None,
+        size: str | None = None, quality: str | None = None,
+        n: int | None = None, **kwargs,
     ) -> tuple[bytes, str]:
         if not image_b64.startswith("data:"):
             image_b64 = f"data:image/png;base64,{image_b64}"
@@ -387,13 +257,9 @@ class OpenRouterProvider(CloudProvider):
         payload: dict = {
             "model": model,
             "prompt": prompt,
-            "input_references": [
-                {"type": "image_url", "image_url": {"url": image_b64}}
-            ],
+            "input_references": [{"type": "image_url", "image_url": {"url": image_b64}}],
         }
-        payload.update(
-            self._build_size_payload(model, resolution, aspect_ratio, size, None, None)
-        )
+        payload.update(self._build_size_payload(model, resolution, aspect_ratio, size, None, None))
         if quality:
             payload["quality"] = quality
         if n and n > 1:
@@ -420,33 +286,23 @@ class OpenRouterProvider(CloudProvider):
                     f"response={json.dumps(err_body, ensure_ascii=False)[:500]}"
                 )
             resp.raise_for_status()
-            data = resp.json()
-            return self._parse_image_response(data)
+            return self._parse_image_response(resp.json())
 
 
 def build_providers() -> dict[str, Optional[BaseProvider]]:
     """Build the provider registry from environment variables.
 
-    Environment variables:
-        LOCAL_MODEL                 — HuggingFace model ID for local diffusion pipeline.
-        LOCAL_MODELS                — Comma-separated short names for local pipeline.
-        API_KEY                     — Bearer token for OpenAI-compat cloud provider.
-        CLOUD_API_BASE_URL          — Base URL of the OpenAI-compat cloud endpoint.
-        CLOUD_MODELS                — Comma-separated model IDs → OpenAICompatProvider.
-        OPENROUTER_API_KEY          — Bearer token for primary OpenRouter endpoint.
-        OPENROUTER_BASE_URL         — Primary OpenRouter base URL (default: https://openrouter.ai).
-        OPENROUTER_FALLBACK_KEY     — Bearer token for fallback OpenRouter endpoint.
-                                      If omitted, OPENROUTER_API_KEY is reused.
-        OPENROUTER_FALLBACK_URL     — Fallback base URL (e.g. https://routerai.ru).
-                                      When set, models get FallbackProvider(primary, secondary).
-        OPENROUTER_MODELS           — Comma-separated model slugs → OpenRouterProvider
-                                      (or FallbackProvider if fallback URL is configured).
+    Required env vars when using OpenRouter models:
+        OPENROUTER_API_KEY      — bearer token
+        OPENROUTER_BASE_URL     — base URL (e.g. https://routerai.ru), NO default
 
-    :returns: Dict mapping model name to provider instance (or None for local).
+    Optional fallback:
+        OPENROUTER_FALLBACK_URL — secondary base URL
+        OPENROUTER_FALLBACK_KEY — secondary key (defaults to OPENROUTER_API_KEY)
     """
     providers: dict[str, Optional[BaseProvider]] = {}
 
-    # ── Local models ──────────────────────────────────────────────────────────
+    # ── Local models ──────────────────────────────────────────────────
     local_default = os.getenv("LOCAL_MODEL", "flux-schnell")
     for model_name in os.getenv("LOCAL_MODELS", local_default).split(","):
         model_name = model_name.strip()
@@ -454,7 +310,7 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
             providers[model_name] = None
             logger.info(f"Registered local model: {model_name!r}")
 
-    # ── OpenAI-compat cloud provider ──────────────────────────────────────────
+    # ── OpenAI-compat cloud provider ───────────────────────────────────
     api_key = os.getenv("API_KEY")
     base_url = os.getenv("CLOUD_API_BASE_URL", "").rstrip("/")
     if api_key and base_url:
@@ -467,13 +323,24 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
     elif api_key and not base_url:
         logger.warning("API_KEY set but CLOUD_API_BASE_URL missing — cloud models unavailable")
 
-    # ── OpenRouter provider ───────────────────────────────────────────────────
+    # ── OpenRouter provider ────────────────────────────────────────────
     or_key = os.getenv("OPENROUTER_API_KEY")
-    if or_key:
-        primary = OpenRouterProvider(
-            api_key=or_key,
-            base_url=os.getenv("OPENROUTER_BASE_URL", OpenRouterProvider.OPENROUTER_BASE),
+    or_url = os.getenv("OPENROUTER_BASE_URL", "").rstrip("/")
+    or_models = [m.strip() for m in os.getenv("OPENROUTER_MODELS", "").split(",") if m.strip()]
+
+    if or_models and not or_key:
+        logger.error("OPENROUTER_MODELS is set but OPENROUTER_API_KEY is missing — models will be unavailable")
+    elif or_models and not or_url:
+        logger.error(
+            "OPENROUTER_MODELS is set but OPENROUTER_BASE_URL is missing — "
+            "set OPENROUTER_BASE_URL (e.g. https://routerai.ru)"
         )
+    elif or_key and or_url:
+        try:
+            primary = OpenRouterProvider(api_key=or_key, base_url=or_url)
+        except ValueError as e:
+            logger.error(f"Failed to create OpenRouterProvider: {e}")
+            return providers
 
         fallback_url = os.getenv("OPENROUTER_FALLBACK_URL", "").rstrip("/")
         fallback_key = os.getenv("OPENROUTER_FALLBACK_KEY") or or_key
@@ -482,19 +349,15 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
             secondary = OpenRouterProvider(api_key=fallback_key, base_url=fallback_url)
             provider: BaseProvider = FallbackProvider(primary=primary, secondary=secondary)
             logger.info(
-                f"OpenRouter fallback configured: primary={primary.base_url!r} "
-                f"secondary={fallback_url!r}"
+                f"OpenRouter: primary={or_url!r} fallback={fallback_url!r}"
             )
         else:
             provider = primary
+            logger.info(f"OpenRouter: single endpoint {or_url!r}")
 
-        for model_name in os.getenv("OPENROUTER_MODELS", "").split(","):
-            model_name = model_name.strip()
-            if model_name:
-                providers[model_name] = provider
-                logger.info(f"Registered OpenRouter model: {model_name!r}")
-    else:
-        logger.info("OPENROUTER_API_KEY not set — OpenRouter models disabled")
+        for model_name in or_models:
+            providers[model_name] = provider
+            logger.info(f"Registered OpenRouter model: {model_name!r}")
 
     return providers
 
