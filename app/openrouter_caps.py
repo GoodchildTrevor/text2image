@@ -1,12 +1,15 @@
 """Dynamic capability discovery for OpenRouter image models.
 
 At startup, ``refresh_caps()`` fetches ``GET /api/v1/images/models`` from
-OpenRouter and builds a mapping of model slug → list of supported sizes
-(largest first).  The result is cached in ``MODEL_SIZES`` and used by
-``clamp_size()`` to pick the best allowed size for each model.
+the configured base URL and builds a mapping of model slug → list of
+supported sizes (largest first).  The result is cached in ``MODEL_SIZES``
+and used by ``clamp_size()`` to pick the best allowed size for each model.
 
 If the endpoint is unreachable or returns unexpected data, a built-in
 fallback table is used so the service still starts cleanly.
+
+The base URL is read from the ``OPENROUTER_BASE_URL`` environment variable
+(default: ``https://openrouter.ai``).  No URL is hardcoded in the module.
 
 Usage::
 
@@ -27,6 +30,14 @@ from typing import Optional
 import httpx
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_BASE_URL = "https://openrouter.ai"
+
+
+def _get_base_url() -> str:
+    """Return the OpenRouter-compatible base URL from env, no hardcoded default in callers."""
+    return os.getenv("OPENROUTER_BASE_URL", _DEFAULT_BASE_URL).rstrip("/")
+
 
 # ---------------------------------------------------------------------------
 # Fallback table — used when the live endpoint is unreachable.
@@ -97,7 +108,6 @@ def _parse_models_response(data: list[dict]) -> dict[str, list[str]]:
         )
         if not sizes_raw:
             continue
-        # Sort by max(w, h) descending
         def _max_side(s: str) -> int:
             try:
                 w, h = map(int, s.split("x"))
@@ -114,20 +124,21 @@ def _parse_models_response(data: list[dict]) -> dict[str, list[str]]:
 
 async def refresh_caps(
     api_key: str | None = None,
-    base_url: str = "https://openrouter.ai",
+    base_url: str | None = None,
     timeout: float = 15.0,
 ) -> None:
-    """Fetch live model capabilities from OpenRouter and update ``MODEL_SIZES``.
+    """Fetch live model capabilities and update ``MODEL_SIZES``.
 
-    On success, ``MODEL_SIZES`` is updated in-place: live data takes precedence
-    for known models, and new models are added.  Fallback entries for models
-    absent in the live response are preserved.
+    The base URL is resolved in this order:
+    1. ``base_url`` argument (if explicitly passed)
+    2. ``OPENROUTER_BASE_URL`` environment variable
+    3. ``https://openrouter.ai`` (built-in last-resort default)
 
-    On any error (network, auth, unexpected schema), the fallback table remains
-    active and a warning is logged — the service continues normally.
+    On any error (network, auth, unexpected schema), the fallback table
+    remains active and a warning is logged.
 
-    :param api_key: OpenRouter API key.  Defaults to ``OPENROUTER_API_KEY`` env var.
-    :param base_url: OpenRouter base URL.
+    :param api_key: API key. Defaults to ``OPENROUTER_API_KEY`` env var.
+    :param base_url: Base URL override. Defaults to ``OPENROUTER_BASE_URL`` env var.
     :param timeout: HTTP timeout in seconds.
     """
     global _live_loaded
@@ -137,7 +148,11 @@ async def refresh_caps(
         logger.warning("openrouter_caps: OPENROUTER_API_KEY not set — using fallback sizes")
         return
 
-    url = f"{base_url.rstrip('/')}/api/v1/images/models"
+    resolved_base = (base_url or _get_base_url()).rstrip("/")
+    url = f"{resolved_base}/api/v1/images/models"
+
+    logger.info(f"openrouter_caps: fetching caps from {url}")
+
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(
@@ -150,7 +165,6 @@ async def refresh_caps(
         logger.warning(f"openrouter_caps: failed to fetch {url}: {exc} — using fallback sizes")
         return
 
-    # The endpoint may return a list directly or wrap it in {"data": [...]}
     if isinstance(payload, dict):
         entries = payload.get("data") or payload.get("models") or []
     elif isinstance(payload, list):
@@ -168,12 +182,11 @@ async def refresh_caps(
         logger.warning("openrouter_caps: could not parse any model sizes — using fallback sizes")
         return
 
-    # Merge: live data wins, fallback entries for absent models are kept
     MODEL_SIZES.update(live)
     _live_loaded = True
     logger.info(
-        f"openrouter_caps: loaded {len(live)} models from live API "
-        f"({'live' if _live_loaded else 'fallback'} total={len(MODEL_SIZES)}). "
+        f"openrouter_caps: loaded {len(live)} models from {resolved_base} "
+        f"(total={len(MODEL_SIZES)}). "
         f"Sample: { {k: v[:2] for k, v in list(live.items())[:5]} }"
     )
 
@@ -191,7 +204,7 @@ def clamp_size(model: str, requested: str | None) -> str | None:
     - If nothing fits → return the square ``1024x1024`` if available, else
       the smallest entry in the allowed list.
 
-    :param model: OpenRouter model slug.
+    :param model: Model slug.
     :param requested: Pixel string ``"WxH"`` or ``None``.
     :returns: Clamped or original size string, or ``None`` if input is ``None``.
     """
@@ -200,7 +213,7 @@ def clamp_size(model: str, requested: str | None) -> str | None:
 
     allowed = MODEL_SIZES.get(model)
     if not allowed:
-        return requested  # no constraints for this model
+        return requested
 
     if requested in allowed:
         return requested
@@ -208,14 +221,14 @@ def clamp_size(model: str, requested: str | None) -> str | None:
     try:
         req_w, req_h = map(int, requested.split("x"))
     except ValueError:
-        return allowed[0]  # malformed → use largest allowed
+        return allowed[0]
 
     req_long = max(req_w, req_h)
     req_landscape = req_w > req_h
     req_portrait = req_h > req_w
     req_square = req_w == req_h
 
-    for candidate in allowed:  # sorted largest-first
+    for candidate in allowed:
         try:
             c_w, c_h = map(int, candidate.split("x"))
         except ValueError:
@@ -233,7 +246,6 @@ def clamp_size(model: str, requested: str | None) -> str | None:
             logger.info(f"size clamp: model={model!r} {requested!r} → {candidate!r}")
             return candidate
 
-    # Fallback: square or last entry
     fallback = "1024x1024" if "1024x1024" in allowed else allowed[-1]
     logger.info(f"size clamp fallback: model={model!r} {requested!r} → {fallback!r}")
     return fallback

@@ -28,7 +28,11 @@ IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: fetch live OpenRouter model capabilities, then optionally warm up local pipeline."""
+    """Startup: fetch live model capabilities, then optionally warm up local pipeline.
+
+    Base URL is read from OPENROUTER_BASE_URL env var (no hardcoded URL here).
+    """
+    # base_url and api_key are resolved inside refresh_caps() from env vars
     await openrouter_caps.refresh_caps()
     if os.getenv("PRELOAD_MODEL", "0") == "1":
         get_pipeline()
