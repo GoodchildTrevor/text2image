@@ -57,7 +57,7 @@ def _resolve_size_params(
     return None, aspect_ratio, 1024, 1024
 
 
-def _make_response(img_bytes: bytes, revised_prompt: str, response_format: strSnapKit) -> ImageGenerationResponse:
+def _make_response(img_bytes: bytes, revised_prompt: str, response_format: str) -> ImageGenerationResponse:
     if response_format == "url":
         url = save_image_bytes(img_bytes)
         return ImageGenerationResponse(
