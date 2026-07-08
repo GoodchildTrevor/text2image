@@ -32,6 +32,9 @@ VALID_SIZES = set(
 
 VALID_RESOLUTIONS = {"512", "1K", "2K", "4K"}
 
+# Field names OpenWebUI may use for the image file
+_IMAGE_FIELD_CANDIDATES = ("image", "image[]", "image_url", "file")
+
 
 def _resolve_size_params(
     size: str | None,
@@ -87,7 +90,11 @@ def _to_data_url(raw: bytes, mime: str | None) -> str:
 
 
 async def _parse_edit_request(http_request: Request) -> ImageEditRequest:
-    """Parse /v1/images/edits body as JSON or multipart/form-data."""
+    """Parse /v1/images/edits body as JSON or multipart/form-data.
+
+    Handles OpenWebUI quirk: image file is sent as 'image[]' (array notation),
+    not 'image'. We try all known field name variants.
+    """
     content_type = (http_request.headers.get("content-type") or "").lower()
     logger.info(f"[edit] content-type: {content_type!r}")
 
@@ -98,21 +105,11 @@ async def _parse_edit_request(http_request: Request) -> ImageEditRequest:
 
         if "multipart/form-data" in content_type:
             form = await http_request.form()
+            logger.info(f"[edit] multipart form keys: {list(form.keys())}")
 
-            # Log all form keys to see what OpenWebUI actually sends
-            form_keys = list(form.keys())
-            logger.info(f"[edit] multipart form keys: {form_keys}")
-            for k in form_keys:
-                v = form.get(k)
-                if isinstance(v, UploadFile):
-                    logger.info(f"[edit] form[{k!r}] = UploadFile(filename={v.filename!r}, content_type={v.content_type!r})")
-                else:
-                    val_preview = str(v)[:120] if v else repr(v)
-                    logger.info(f"[edit] form[{k!r}] = {val_preview!r}")
-
-            # Try 'image' first, then 'image_url' (some OpenWebUI versions use this)
+            # Find image among known field name variants (image, image[], image_url, file)
             image_value: str | None = None
-            for field_name in ("image", "image_url"):
+            for field_name in _IMAGE_FIELD_CANDIDATES:
                 image_part = form.get(field_name)
                 if image_part is None:
                     continue
@@ -120,11 +117,11 @@ async def _parse_edit_request(http_request: Request) -> ImageEditRequest:
                     raw = await image_part.read()
                     if raw:
                         image_value = _to_data_url(raw, image_part.content_type)
-                        logger.info(f"[edit] read image from field {field_name!r}, {len(raw)} bytes")
+                        logger.info(f"[edit] image from field {field_name!r}: {len(raw)} bytes")
                     break
                 elif isinstance(image_part, str) and image_part:
                     image_value = image_part
-                    logger.info(f"[edit] read image from field {field_name!r} as string, len={len(image_part)}")
+                    logger.info(f"[edit] image from field {field_name!r}: string len={len(image_part)}")
                     break
 
             raw_payload: dict = {
