@@ -211,6 +211,7 @@ async def edit_image(
     provider = PROVIDERS[model]
     if provider is None:
         raise ValueError(f"Model '{model}' does not support image editing")
+
     return await provider.edit(
         model=model,
         prompt=prompt,
@@ -218,5 +219,4 @@ async def edit_image(
         size=size,
         resolution=resolution,
         aspect_ratio=aspect_ratio,
-        **kwargs,
     )
