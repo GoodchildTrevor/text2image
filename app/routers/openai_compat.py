@@ -57,7 +57,7 @@ def _resolve_size_params(
     return None, aspect_ratio, 1024, 1024
 
 
-def _make_response(img_bytes: bytes, revised_prompt: str, response_format: str) -> ImageGenerationResponse:
+def _make_response(img_bytes: bytes, revised_prompt: str, response_format: strSnapKit) -> ImageGenerationResponse:
     if response_format == "url":
         url = save_image_bytes(img_bytes)
         return ImageGenerationResponse(
@@ -126,11 +126,11 @@ async def openai_edit(request: ImageEditRequest):
             "response_format": "url"
         }
     """
+    img_info = f"<b64 len={len(request.image)}>" if request.image else "None"
     logger.info(
         f"Edit: model={request.model!r}, size={request.size!r}, "
         f"resolution={request.resolution!r}, aspect_ratio={request.aspect_ratio!r}, "
-        f"prompt={request.prompt[:80]!r}, "
-        f"image={'<b64 len='+str(len(request.image))+'>'' if request.image else 'None'}"
+        f"prompt={request.prompt[:80]!r}, image={img_info}"
     )
 
     if request.n != 1:
