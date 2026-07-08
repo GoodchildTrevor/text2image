@@ -32,8 +32,8 @@ VALID_SIZES = set(
 
 VALID_RESOLUTIONS = {"512", "1K", "2K", "4K"}
 
-# Field names OpenWebUI may use for the image file
-_IMAGE_FIELD_CANDIDATES = ("image", "image[]", "image_url", "file")
+# Normalized base names to treat as the image field ([] suffix stripped)
+_IMAGE_FIELD_BASES = {"image", "image_url", "file"}
 
 
 def _resolve_size_params(
@@ -89,12 +89,34 @@ def _to_data_url(raw: bytes, mime: str | None) -> str:
     return f"data:{mime};base64,{b64}"
 
 
-async def _parse_edit_request(http_request: Request) -> ImageEditRequest:
-    """Parse /v1/images/edits body as JSON or multipart/form-data.
+def _is_image_field(name: str) -> bool:
+    """Match 'image', 'image[]', 'image_url', 'file', etc."""
+    normalized = name.rstrip("[]").lower()
+    return normalized in _IMAGE_FIELD_BASES
 
-    Handles OpenWebUI quirk: image file is sent as 'image[]' (array notation),
-    not 'image'. We try all known field name variants.
+
+async def _extract_image_from_form(form) -> str | None:
+    """Iterate all form items to find the first image file or base64 string.
+
+    Uses multi_items() instead of form.get() because Starlette's ImmutableMultiDict
+    does not support bracket-notation keys like 'image[]' via .get().
     """
+    for key, value in form.multi_items():
+        if not _is_image_field(key):
+            continue
+        if isinstance(value, UploadFile):
+            raw = await value.read()
+            if raw:
+                logger.info(f"[edit] image from field {key!r}: {len(raw)} bytes, mime={value.content_type!r}")
+                return _to_data_url(raw, value.content_type)
+        elif isinstance(value, str) and value:
+            logger.info(f"[edit] image from field {key!r}: string len={len(value)}")
+            return value
+    return None
+
+
+async def _parse_edit_request(http_request: Request) -> ImageEditRequest:
+    """Parse /v1/images/edits body as JSON or multipart/form-data."""
     content_type = (http_request.headers.get("content-type") or "").lower()
     logger.info(f"[edit] content-type: {content_type!r}")
 
@@ -107,22 +129,7 @@ async def _parse_edit_request(http_request: Request) -> ImageEditRequest:
             form = await http_request.form()
             logger.info(f"[edit] multipart form keys: {list(form.keys())}")
 
-            # Find image among known field name variants (image, image[], image_url, file)
-            image_value: str | None = None
-            for field_name in _IMAGE_FIELD_CANDIDATES:
-                image_part = form.get(field_name)
-                if image_part is None:
-                    continue
-                if isinstance(image_part, UploadFile):
-                    raw = await image_part.read()
-                    if raw:
-                        image_value = _to_data_url(raw, image_part.content_type)
-                        logger.info(f"[edit] image from field {field_name!r}: {len(raw)} bytes")
-                    break
-                elif isinstance(image_part, str) and image_part:
-                    image_value = image_part
-                    logger.info(f"[edit] image from field {field_name!r}: string len={len(image_part)}")
-                    break
+            image_value = await _extract_image_from_form(form)
 
             raw_payload: dict = {
                 "prompt": form.get("prompt"),
