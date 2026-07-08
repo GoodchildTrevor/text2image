@@ -122,7 +122,15 @@ async def openai_edit(request: Request):
     and ``image[]`` (OpenWebUI) field names, as FastAPI's File/alias
     mechanism does not support bracket-notation field names.
     """
-    form = await request.form()
+    try:
+        form = await request.form()
+    except Exception as e:
+        logger.error(f"Edit: failed to parse multipart form: {e}")
+        raise HTTPException(
+            400,
+            "Malformed multipart request — image body is empty or truncated. "
+            "The image URL may have expired before the pipe could download it."
+        )
 
     prompt = form.get("prompt")
     if not prompt:
@@ -131,9 +139,14 @@ async def openai_edit(request: Request):
     model = form.get("model") or os.getenv("LOCAL_MODEL", "black-forest-labs/FLUX.1-schnell")
     n = int(form.get("n", 1))
     size = form.get("size") or None
+    resolution = form.get("resolution") or None
+    aspect_ratio = form.get("aspect_ratio") or None
     response_format = form.get("response_format") or "b64_json"
 
-    logger.info(f"Edit: model={model!r}, size={size!r}, prompt={prompt[:80]!r}")
+    logger.info(
+        f"Edit: model={model!r}, size={size!r}, resolution={resolution!r}, "
+        f"aspect_ratio={aspect_ratio!r}, prompt={prompt[:80]!r}"
+    )
 
     if n != 1:
         raise HTTPException(400, "Only n=1 is supported")
@@ -158,7 +171,9 @@ async def openai_edit(request: Request):
     logger.info(f"Edit: image_bytes={len(raw)} bytes")
     image_b64 = base64.b64encode(raw).decode()
 
-    resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(size, None, None)
+    resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(
+        size, resolution, aspect_ratio
+    )
 
     try:
         img_bytes, revised_prompt = await edit_image(
