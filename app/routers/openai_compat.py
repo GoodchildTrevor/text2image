@@ -5,8 +5,7 @@ import os
 from typing import Optional
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from starlette.datastructures import UploadFile
-from app.config import ImageGenerationRequest, ImageGenerationResponse, ImageObject
+from app.config import ImageGenerationRequest, ImageEditRequest, ImageGenerationResponse, ImageObject
 from app.service import generate_image, edit_image, save_image_bytes
 
 logger = logging.getLogger(__name__)
@@ -14,8 +13,6 @@ router = APIRouter(prefix="/v1")
 
 DEFAULT_STEPS = int(os.getenv("FLUX_DEFAULT_STEPS", "4"))
 DEFAULT_GUIDANCE = float(os.getenv("FLUX_DEFAULT_GUIDANCE", "1.0"))
-
-OWUI_BASE_URL = os.getenv("OWUI_BASE_URL", "http://open-webui:8080")
 
 _default_sizes = "1024x1024,864x1184,1184x864,768x1344,1344x768"
 VALID_SIZES = set(
@@ -114,77 +111,49 @@ async def openai_generate(request: ImageGenerationRequest):
         raise HTTPException(500, "Image generation failed")
 
 
-@router.post("/images/edits")
-async def openai_edit(request: Request):
-    """Edit an existing image via multipart/form-data.
+@router.post("/images/edits", response_model=ImageGenerationResponse)
+async def openai_edit(request: ImageEditRequest):
+    """Edit an image. Accepts JSON with image as base64 string in `image` field.
 
-    Parses the form manually to support both ``image`` (standard OpenAI)
-    and ``image[]`` (OpenWebUI) field names, as FastAPI's File/alias
-    mechanism does not support bracket-notation field names.
+    Expected payload::
+
+        {
+            "model": "...",
+            "prompt": "...",
+            "image": "<base64-encoded PNG, optionally with data:image/...;base64, prefix>",
+            "resolution": "1K",
+            "aspect_ratio": "1:1",
+            "response_format": "url"
+        }
     """
-    try:
-        form = await request.form()
-    except Exception as e:
-        logger.error(f"Edit: failed to parse multipart form: {e}")
-        raise HTTPException(
-            400,
-            "Malformed multipart request — image body is empty or truncated. "
-            "The image URL may have expired before the pipe could download it."
-        )
-
-    prompt = form.get("prompt")
-    if not prompt:
-        raise HTTPException(400, "Field 'prompt' is required")
-
-    model = form.get("model") or os.getenv("LOCAL_MODEL", "black-forest-labs/FLUX.1-schnell")
-    n = int(form.get("n", 1))
-    size = form.get("size") or None
-    resolution = form.get("resolution") or None
-    aspect_ratio = form.get("aspect_ratio") or None
-    response_format = form.get("response_format") or "b64_json"
-
     logger.info(
-        f"Edit: model={model!r}, size={size!r}, resolution={resolution!r}, "
-        f"aspect_ratio={aspect_ratio!r}, prompt={prompt[:80]!r}"
+        f"Edit: model={request.model!r}, size={request.size!r}, "
+        f"resolution={request.resolution!r}, aspect_ratio={request.aspect_ratio!r}, "
+        f"prompt={request.prompt[:80]!r}, "
+        f"image={'<b64 len='+str(len(request.image))+'>'' if request.image else 'None'}"
     )
 
-    if n != 1:
+    if request.n != 1:
         raise HTTPException(400, "Only n=1 is supported")
-    if response_format not in ("b64_json", "url"):
+    if request.response_format not in ("b64_json", "url"):
         raise HTTPException(400, "response_format must be 'b64_json' or 'url'")
-
-    # Find image file under any field name (image, image[], etc.)
-    image_file: Optional[UploadFile] = None
-    for key, val in form.multi_items():
-        if isinstance(val, UploadFile):
-            image_file = val
-            logger.info(f"Edit: image field name={key!r}, filename={val.filename!r}")
-            break
-
-    if image_file is None:
-        raise HTTPException(400, "No image file provided")
-
-    raw = await image_file.read()
-    if not raw:
-        raise HTTPException(400, "Image file is empty — the URL may have expired or upload failed")
-
-    logger.info(f"Edit: image_bytes={len(raw)} bytes")
-    image_b64 = base64.b64encode(raw).decode()
+    if not request.image:
+        raise HTTPException(400, "Field 'image' (base64) is required for edits")
 
     resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(
-        size, resolution, aspect_ratio
+        request.size, request.resolution, request.aspect_ratio
     )
 
     try:
         img_bytes, revised_prompt = await edit_image(
-            model=model,
-            prompt=prompt,
-            image_b64=image_b64,
-            size=size if resolved_resolution is None else None,
+            model=request.model,
+            prompt=request.prompt,
+            image_b64=request.image,
+            size=request.size if resolved_resolution is None else None,
             resolution=resolved_resolution,
             aspect_ratio=resolved_aspect_ratio,
         )
-        return _make_response(img_bytes, revised_prompt, response_format)
+        return _make_response(img_bytes, revised_prompt, request.response_format)
     except httpx.HTTPStatusError as e:
         status = e.response.status_code
         try:
@@ -193,12 +162,12 @@ async def openai_edit(request: Request):
             detail = e.response.text
         if status == 403:
             msg = (
-                f"Model {model!r} does not support image editing on this provider. "
+                f"Model {request.model!r} does not support image editing on this provider. "
                 f"Try recraft/recraft-v4 or bytedance-seed/seedream-4.5 instead."
             )
-            logger.warning(f"Edit 403 for model={model!r}: {detail}")
+            logger.warning(f"Edit 403 for model={request.model!r}: {detail}")
             raise HTTPException(400, msg)
-        logger.error(f"Edit HTTP {status} for model={model!r}: {detail}")
+        logger.error(f"Edit HTTP {status} for model={request.model!r}: {detail}")
         raise HTTPException(400, f"Provider error {status}: {detail}")
     except ValueError as e:
         logger.error(f"ValueError in edit_image: {e}")
