@@ -87,12 +87,9 @@ def _to_data_url(raw: bytes, mime: str | None) -> str:
 
 
 async def _parse_edit_request(http_request: Request) -> ImageEditRequest:
-    """Parse /v1/images/edits body as JSON or multipart/form-data.
-
-    - application/json  → use ImageEditRequest Pydantic model directly
-    - multipart/form-data → read form fields + UploadFile, build equivalent payload
-    """
+    """Parse /v1/images/edits body as JSON or multipart/form-data."""
     content_type = (http_request.headers.get("content-type") or "").lower()
+    logger.info(f"[edit] content-type: {content_type!r}")
 
     try:
         if "application/json" in content_type:
@@ -101,19 +98,34 @@ async def _parse_edit_request(http_request: Request) -> ImageEditRequest:
 
         if "multipart/form-data" in content_type:
             form = await http_request.form()
-            image_part = form.get("image")
-            image_value: str | None = None
 
-            if isinstance(image_part, UploadFile):
-                raw = await image_part.read()
-                if not raw:
-                    raise HTTPException(400, "Uploaded image file is empty")
-                image_value = _to_data_url(raw, image_part.content_type)
-            elif isinstance(image_part, str) and image_part:
-                # Already a base64 string or data URL sent as form field
-                image_value = image_part
-            elif image_part is not None:
-                raise HTTPException(400, "Field 'image' must be a file upload or base64 string")
+            # Log all form keys to see what OpenWebUI actually sends
+            form_keys = list(form.keys())
+            logger.info(f"[edit] multipart form keys: {form_keys}")
+            for k in form_keys:
+                v = form.get(k)
+                if isinstance(v, UploadFile):
+                    logger.info(f"[edit] form[{k!r}] = UploadFile(filename={v.filename!r}, content_type={v.content_type!r})")
+                else:
+                    val_preview = str(v)[:120] if v else repr(v)
+                    logger.info(f"[edit] form[{k!r}] = {val_preview!r}")
+
+            # Try 'image' first, then 'image_url' (some OpenWebUI versions use this)
+            image_value: str | None = None
+            for field_name in ("image", "image_url"):
+                image_part = form.get(field_name)
+                if image_part is None:
+                    continue
+                if isinstance(image_part, UploadFile):
+                    raw = await image_part.read()
+                    if raw:
+                        image_value = _to_data_url(raw, image_part.content_type)
+                        logger.info(f"[edit] read image from field {field_name!r}, {len(raw)} bytes")
+                    break
+                elif isinstance(image_part, str) and image_part:
+                    image_value = image_part
+                    logger.info(f"[edit] read image from field {field_name!r} as string, len={len(image_part)}")
+                    break
 
             raw_payload: dict = {
                 "prompt": form.get("prompt"),
@@ -121,7 +133,6 @@ async def _parse_edit_request(http_request: Request) -> ImageEditRequest:
                 "n": int(form.get("n") or 1),
                 "response_format": form.get("response_format") or "b64_json",
             }
-            # Optional fields — only include if present to let model defaults apply
             for field in ("model", "size", "resolution", "aspect_ratio", "quality"):
                 val = form.get(field)
                 if val is not None:
