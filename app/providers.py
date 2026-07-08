@@ -68,6 +68,43 @@ class CloudProvider(BaseProvider, ABC):
         return {"Authorization": f"Bearer {self.api_key}"}
 
 
+class FallbackProvider(BaseProvider):
+    """Wraps two providers: tries ``primary`` first, falls back to ``secondary``
+    on any HTTP error (4xx/5xx) or connection failure.
+
+    :param primary: Provider to try first.
+    :param secondary: Provider to use when primary fails.
+    """
+
+    def __init__(self, primary: BaseProvider, secondary: BaseProvider):
+        self.primary = primary
+        self.secondary = secondary
+
+    async def generate(self, model: str, prompt: str, **kwargs) -> tuple[bytes, str]:
+        try:
+            result = await self.primary.generate(model=model, prompt=prompt, **kwargs)
+            logger.info(f"FallbackProvider.generate: primary OK for model={model!r}")
+            return result
+        except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException, ValueError) as e:
+            logger.warning(
+                f"FallbackProvider.generate: primary failed for model={model!r} ({type(e).__name__}: {e}), "
+                f"switching to secondary"
+            )
+            return await self.secondary.generate(model=model, prompt=prompt, **kwargs)
+
+    async def edit(self, model: str, prompt: str, image_b64: str, **kwargs) -> tuple[bytes, str]:
+        try:
+            result = await self.primary.edit(model=model, prompt=prompt, image_b64=image_b64, **kwargs)
+            logger.info(f"FallbackProvider.edit: primary OK for model={model!r}")
+            return result
+        except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException, ValueError) as e:
+            logger.warning(
+                f"FallbackProvider.edit: primary failed for model={model!r} ({type(e).__name__}: {e}), "
+                f"switching to secondary"
+            )
+            return await self.secondary.edit(model=model, prompt=prompt, image_b64=image_b64, **kwargs)
+
+
 class OpenAICompatProvider(CloudProvider):
     """Image generation and editing via an OpenAI-compatible /chat/completions API.
 
@@ -205,7 +242,7 @@ class OpenAICompatProvider(CloudProvider):
 
 
 class OpenRouterProvider(CloudProvider):
-    """Image generation and editing via the OpenRouter dedicated Image API.
+    """Image generation and editing via an OpenRouter-compatible Image API.
 
     Uses ``POST /api/v1/images`` (not /chat/completions).
     Returns images as ``data[0].b64_json``.
@@ -213,9 +250,7 @@ class OpenRouterProvider(CloudProvider):
     Parameter priority for output dimensions:
     1. ``size`` (``WxH`` string) — clamped via ``openrouter_caps.clamp_size()``.
     2. ``width`` + ``height``    — combined into ``WxH``, then clamped.
-    3. ``resolution`` + ``aspect_ratio`` — forwarded directly (legacy/fallback).
-
-    Docs: https://openrouter.ai/docs/guides/overview/multimodal/image-generation
+    3. ``resolution`` + ``aspect_ratio`` — forwarded directly.
 
     :param api_key: Bearer token. Falls back to ``OPENROUTER_API_KEY`` env var.
     :param base_url: Base URL. Defaults to ``https://openrouter.ai``.
@@ -298,29 +333,17 @@ class OpenRouterProvider(CloudProvider):
         n: int | None = None,
         **kwargs,
     ) -> tuple[bytes, str]:
-        """Text-to-image via OpenRouter /api/v1/images.
-
-        :param model: OpenRouter model slug, e.g. ``openai/gpt-5-image``.
-        :param prompt: Text prompt.
-        :param size: Pixel string ``"WxH"`` — clamped to model-specific limits.
-        :param resolution: Tier string (``"1K"`` etc.) forwarded only when ``size`` absent.
-        :param aspect_ratio: Ratio string forwarded alongside ``resolution``.
-        :param quality: ``auto``, ``low``, ``medium``, or ``high``.
-        :param n: Number of images to generate (1-10).
-        :returns: A tuple of (PNG image bytes, revised_prompt).
-        """
         payload: dict = {"model": model, "prompt": prompt}
         payload.update(
             self._build_size_payload(model, resolution, aspect_ratio, size, width, height)
         )
-
         if quality:
             payload["quality"] = quality
         if n and n > 1:
             payload["n"] = n
 
         logger.info(
-            f"openrouter generate: model={model!r} "
+            f"openrouter generate: model={model!r} base_url={self.base_url!r} "
             f"resolution={resolution!r} aspect_ratio={aspect_ratio!r} "
             f"size={size!r} → payload_size={payload.get('size')!r}"
         )
@@ -358,10 +381,6 @@ class OpenRouterProvider(CloudProvider):
         n: int | None = None,
         **kwargs,
     ) -> tuple[bytes, str]:
-        """Image-to-image edit via OpenRouter /api/v1/images with input_references.
-
-        :param image_b64: Base64-encoded image — raw base64 or data URI.
-        """
         if not image_b64.startswith("data:"):
             image_b64 = f"data:image/png;base64,{image_b64}"
 
@@ -375,15 +394,14 @@ class OpenRouterProvider(CloudProvider):
         payload.update(
             self._build_size_payload(model, resolution, aspect_ratio, size, None, None)
         )
-
         if quality:
             payload["quality"] = quality
         if n and n > 1:
             payload["n"] = n
 
         logger.info(
-            f"openrouter edit: model={model!r} resolution={resolution!r} "
-            f"size={size!r} → payload_size={payload.get('size')!r}"
+            f"openrouter edit: model={model!r} base_url={self.base_url!r} "
+            f"resolution={resolution!r} size={size!r} → payload_size={payload.get('size')!r}"
         )
 
         async with httpx.AsyncClient(timeout=180) as client:
@@ -410,16 +428,19 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
     """Build the provider registry from environment variables.
 
     Environment variables:
-        LOCAL_MODEL           — HuggingFace model ID for the local diffusion pipeline.
-                                Also used as fallback when LOCAL_MODELS is not set.
-        LOCAL_MODELS          — Comma-separated short names mapped to the local pipeline
-                                (provider = None). Defaults to LOCAL_MODEL.
-        API_KEY               — Bearer token for the OpenAI-compat cloud provider.
-        CLOUD_API_BASE_URL    — Base URL of the OpenAI-compat cloud endpoint.
-        CLOUD_MODELS          — Comma-separated model IDs → OpenAICompatProvider.
-        OPENROUTER_API_KEY    — Bearer token for OpenRouter.
-        OPENROUTER_BASE_URL   — Override OpenRouter base URL (default: https://openrouter.ai).
-        OPENROUTER_MODELS     — Comma-separated model slugs → OpenRouterProvider.
+        LOCAL_MODEL                 — HuggingFace model ID for local diffusion pipeline.
+        LOCAL_MODELS                — Comma-separated short names for local pipeline.
+        API_KEY                     — Bearer token for OpenAI-compat cloud provider.
+        CLOUD_API_BASE_URL          — Base URL of the OpenAI-compat cloud endpoint.
+        CLOUD_MODELS                — Comma-separated model IDs → OpenAICompatProvider.
+        OPENROUTER_API_KEY          — Bearer token for primary OpenRouter endpoint.
+        OPENROUTER_BASE_URL         — Primary OpenRouter base URL (default: https://openrouter.ai).
+        OPENROUTER_FALLBACK_KEY     — Bearer token for fallback OpenRouter endpoint.
+                                      If omitted, OPENROUTER_API_KEY is reused.
+        OPENROUTER_FALLBACK_URL     — Fallback base URL (e.g. https://routerai.ru).
+                                      When set, models get FallbackProvider(primary, secondary).
+        OPENROUTER_MODELS           — Comma-separated model slugs → OpenRouterProvider
+                                      (or FallbackProvider if fallback URL is configured).
 
     :returns: Dict mapping model name to provider instance (or None for local).
     """
@@ -449,11 +470,28 @@ def build_providers() -> dict[str, Optional[BaseProvider]]:
     # ── OpenRouter provider ───────────────────────────────────────────────────
     or_key = os.getenv("OPENROUTER_API_KEY")
     if or_key:
-        openrouter = OpenRouterProvider(api_key=or_key)
+        primary = OpenRouterProvider(
+            api_key=or_key,
+            base_url=os.getenv("OPENROUTER_BASE_URL", OpenRouterProvider.OPENROUTER_BASE),
+        )
+
+        fallback_url = os.getenv("OPENROUTER_FALLBACK_URL", "").rstrip("/")
+        fallback_key = os.getenv("OPENROUTER_FALLBACK_KEY") or or_key
+
+        if fallback_url:
+            secondary = OpenRouterProvider(api_key=fallback_key, base_url=fallback_url)
+            provider: BaseProvider = FallbackProvider(primary=primary, secondary=secondary)
+            logger.info(
+                f"OpenRouter fallback configured: primary={primary.base_url!r} "
+                f"secondary={fallback_url!r}"
+            )
+        else:
+            provider = primary
+
         for model_name in os.getenv("OPENROUTER_MODELS", "").split(","):
             model_name = model_name.strip()
             if model_name:
-                providers[model_name] = openrouter
+                providers[model_name] = provider
                 logger.info(f"Registered OpenRouter model: {model_name!r}")
     else:
         logger.info("OPENROUTER_API_KEY not set — OpenRouter models disabled")
