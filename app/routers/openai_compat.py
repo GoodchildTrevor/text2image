@@ -152,6 +152,10 @@ async def openai_edit(request: Request):
         raise HTTPException(400, "No image file provided")
 
     raw = await image_file.read()
+    if not raw:
+        raise HTTPException(400, "Image file is empty — the URL may have expired or upload failed")
+
+    logger.info(f"Edit: image_bytes={len(raw)} bytes")
     image_b64 = base64.b64encode(raw).decode()
 
     resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(size, None, None)
@@ -166,6 +170,21 @@ async def openai_edit(request: Request):
             aspect_ratio=resolved_aspect_ratio,
         )
         return _make_response(img_bytes, revised_prompt, response_format)
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        try:
+            detail = e.response.json()
+        except Exception:
+            detail = e.response.text
+        if status == 403:
+            msg = (
+                f"Model {model!r} does not support image editing on this provider. "
+                f"Try recraft/recraft-v4 or bytedance-seed/seedream-4.5 instead."
+            )
+            logger.warning(f"Edit 403 for model={model!r}: {detail}")
+            raise HTTPException(400, msg)
+        logger.error(f"Edit HTTP {status} for model={model!r}: {detail}")
+        raise HTTPException(400, f"Provider error {status}: {detail}")
     except ValueError as e:
         logger.error(f"ValueError in edit_image: {e}")
         raise HTTPException(400, str(e))
