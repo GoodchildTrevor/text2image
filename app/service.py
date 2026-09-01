@@ -12,6 +12,7 @@ import logging
 from typing import Optional
 
 from app.providers import PROVIDERS
+from app.sizing import resolve_and_validate_size
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,7 @@ async def generate_image(
     guidance: float = None,
     resolution: str | None = None,
     aspect_ratio: str | None = None,
+    size: str | None = None,
     **kwargs,
 ) -> tuple[bytes, str]:
     """Generate an image from a text prompt using the specified provider.
@@ -129,13 +131,20 @@ async def generate_image(
     Routes to a local diffusion pipeline (when ``provider is None``) or
     to a cloud provider. Returns PNG bytes and the final prompt used.
 
+    Validation of ``size``/``resolution``/``aspect_ratio`` is centralized in
+    :func:`app.sizing.resolve_and_validate_size` — this is the single source
+    of truth used by every caller (OpenAI-compatible router, direct image
+    endpoint, and any future entry point), instead of each caller
+    re-implementing its own checks.
+
     For the local pipeline, dimensions are resolved in this order:
     1. Explicit ``width`` + ``height``
-    2. ``resolution`` tier mapped via ``_RESOLUTION_TO_PIXELS``
-    3. Default 1024x1024
+    2. ``size`` string (``WIDTHxHEIGHT``), parsed via ``resolve_and_validate_size``
+    3. ``resolution`` tier mapped via ``_RESOLUTION_TO_PIXELS``
+    4. Default 1024x1024
 
-    For cloud providers, ``resolution``, ``aspect_ratio``, and any extra
-    ``**kwargs`` (e.g. ``size``, ``quality``) are forwarded as-is.
+    For cloud providers, ``resolution``, ``aspect_ratio``, ``size``, and any
+    extra ``**kwargs`` (e.g. ``quality``) are forwarded as-is.
 
     :param model: The model identifier to look up in the provider registry.
     :param prompt: The text prompt describing the desired image.
@@ -145,15 +154,28 @@ async def generate_image(
     :param guidance: Guidance scale (local pipeline only).
     :param resolution: OpenRouter resolution tier (``"512"``, ``"1K"``, ``"2K"``, ``"4K"``).
     :param aspect_ratio: OpenRouter aspect ratio string (``"1:1"``, ``"16:9"``, ...).
+    :param size: Explicit ``WIDTHxHEIGHT`` string or resolution tier, validated
+        against ``app.sizing.VALID_SIZES`` / ``VALID_RESOLUTIONS``.
     :returns: A tuple of (PNG image bytes, prompt used for generation).
-    :raises ValueError: If ``model`` is not registered in the provider registry.
+    :raises ValueError: If ``model`` is not registered in the provider registry,
+        or if ``size``/``resolution``/``aspect_ratio`` fail validation.
     """
     if model not in PROVIDERS:
         raise ValueError(f"Unknown model '{model}'")
     provider = PROVIDERS[model]
 
+    resolution, aspect_ratio, size_width, size_height = resolve_and_validate_size(
+        size=size, resolution=resolution, aspect_ratio=aspect_ratio
+    )
+    # Forward the raw `size` string to cloud providers only when it wasn't
+    # consumed as a resolution tier — mirrors OpenRouterProvider's
+    # `_build_size_payload` priority of size > width/height > resolution.
+    forwarded_size = None if resolution is not None else size
+
     if provider is None:
         # Resolve pixel dimensions for local pipeline
+        if width is None and height is None:
+            width, height = size_width, size_height
         if not (width and height) and resolution:
             width, height = _RESOLUTION_TO_PIXELS.get(resolution, (1024, 1024))
         width = width or 1024
@@ -179,6 +201,7 @@ async def generate_image(
             guidance=guidance,
             resolution=resolution,
             aspect_ratio=aspect_ratio,
+            size=forwarded_size,
             **kwargs,
         )
 
@@ -197,6 +220,9 @@ async def edit_image(
     Only cloud providers support image editing; the local pipeline
     will raise ``ValueError``.
 
+    Validation of ``size``/``resolution``/``aspect_ratio`` is centralized in
+    :func:`app.sizing.resolve_and_validate_size`.
+
     :param model: The model identifier to look up in the provider registry.
     :param prompt: The text prompt describing the desired edit.
     :param image_b64: Base64-encoded input image.
@@ -204,7 +230,8 @@ async def edit_image(
     :param resolution: OpenRouter resolution tier.
     :param aspect_ratio: OpenRouter aspect ratio string.
     :returns: A tuple of (edited PNG image bytes, revised prompt).
-    :raises ValueError: If ``model`` is unknown or does not support editing.
+    :raises ValueError: If ``model`` is unknown, does not support editing,
+        or if ``size``/``resolution``/``aspect_ratio`` fail validation.
     """
     if model not in PROVIDERS:
         raise ValueError(f"Unknown model '{model}'")
@@ -212,11 +239,16 @@ async def edit_image(
     if provider is None:
         raise ValueError(f"Model '{model}' does not support image editing")
 
+    resolution, aspect_ratio, _, _ = resolve_and_validate_size(
+        size=size, resolution=resolution, aspect_ratio=aspect_ratio
+    )
+    forwarded_size = None if resolution is not None else size
+
     return await provider.edit(
         model=model,
         prompt=prompt,
         image_b64=image_b64,
-        size=size,
+        size=forwarded_size,
         resolution=resolution,
         aspect_ratio=aspect_ratio,
     )
