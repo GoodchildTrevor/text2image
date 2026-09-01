@@ -1,4 +1,5 @@
 import base64
+import io
 import time
 import logging
 import os
@@ -6,6 +7,7 @@ from typing import Annotated, Optional
 
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from PIL import Image, UnidentifiedImageError
 from app.config import (
     ImageGenerationRequest,
     ImageGenerationResponse,
@@ -70,6 +72,25 @@ def _to_data_url(raw: bytes, mime: str | None) -> str:
     mime = (mime or "image/png").split(";")[0].strip()
     b64 = base64.b64encode(raw).decode()
     return f"data:{mime};base64,{b64}"
+
+
+def _normalize_image(raw: bytes) -> tuple[bytes, str]:
+    """Re-encode any uploaded image to PNG so unsupported formats
+    (BMP, TIFF, HEIC, ICO, GIF, ...) never reach the cloud provider as-is.
+    Providers like Gemini reject e.g. image/bmp outright."""
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img.load()
+    except UnidentifiedImageError:
+        raise HTTPException(400, "Uploaded file is not a valid image")
+
+    if img.mode not in ("RGB", "RGBA"):
+        has_alpha = img.mode in ("P", "LA", "PA") and "transparency" in img.info
+        img = img.convert("RGBA" if has_alpha else "RGB")
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue(), "image/png"
 
 
 @router.post("/images/generations", response_model=ImageGenerationResponse)
@@ -143,8 +164,10 @@ async def openai_edit(
     raw = await upload.read()
     if not raw:
         raise HTTPException(400, "Uploaded image file is empty")
-    image_b64 = _to_data_url(raw, upload.content_type)
-    logger.info(f"[edit] image read: {len(raw)} bytes, mime={upload.content_type!r}")
+    original_mime = upload.content_type
+    raw, mime = _normalize_image(raw)
+    image_b64 = _to_data_url(raw, mime)
+    logger.info(f"[edit] image read: {len(raw)} bytes, original_mime={original_mime!r}, normalized_mime={mime!r}")
 
     if model is None:
         model = os.getenv("DEFAULT_MODEL", "black-forest-labs/FLUX.1-schnell")
