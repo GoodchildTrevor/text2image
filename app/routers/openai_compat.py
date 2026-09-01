@@ -21,37 +21,9 @@ router = APIRouter(prefix="/v1")
 DEFAULT_STEPS = int(os.getenv("FLUX_DEFAULT_STEPS", "4"))
 DEFAULT_GUIDANCE = float(os.getenv("FLUX_DEFAULT_GUIDANCE", "1.0"))
 
-_default_sizes = "1024x1024,864x1184,1184x864,768x1344,1344x768"
-VALID_SIZES = set(
-    s.strip()
-    for s in os.getenv("VALID_SIZES", _default_sizes).split(",")
-    if s.strip()
-)
-VALID_RESOLUTIONS = {"512", "1K", "2K", "4K"}
-
-
-def _resolve_size_params(
-    size: str | None,
-    resolution: str | None,
-    aspect_ratio: str | None,
-) -> tuple[str | None, str | None, int | None, int | None]:
-    if resolution is not None:
-        if resolution not in VALID_RESOLUTIONS:
-            raise HTTPException(400, f"Invalid resolution {resolution!r}. Must be one of: {sorted(VALID_RESOLUTIONS)}")
-        return resolution, aspect_ratio, None, None
-
-    if size is not None:
-        if size in VALID_RESOLUTIONS:
-            return size, aspect_ratio, None, None
-        if size not in VALID_SIZES:
-            raise HTTPException(400, f"Invalid size {size!r}. Must be one of: {sorted(VALID_SIZES)} or resolution tier: {sorted(VALID_RESOLUTIONS)}")
-        try:
-            w, h = map(int, size.split("x"))
-        except ValueError:
-            raise HTTPException(400, f"Malformed size {size!r}, expected WxH format")
-        return None, aspect_ratio, w, h
-
-    return None, aspect_ratio, 1024, 1024
+# size/resolution/aspect_ratio validation now lives in app.sizing —
+# generate_image()/edit_image() call resolve_and_validate_size() internally,
+# so this router only forwards the raw values from the request.
 
 
 def _make_response(img_bytes: bytes, revised_prompt: str, response_format: str) -> ImageGenerationResponse:
@@ -107,22 +79,16 @@ async def openai_generate(request: ImageGenerationRequest):
     if request.response_format not in ("b64_json", "url"):
         raise HTTPException(400, "response_format must be 'b64_json' or 'url'")
 
-    resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(
-        request.size, request.resolution, request.aspect_ratio
-    )
-
     try:
         img_bytes, revised_prompt = await generate_image(
             model=request.model,
             prompt=request.prompt,
-            width=w,
-            height=h,
             steps=DEFAULT_STEPS,
             guidance=DEFAULT_GUIDANCE,
-            resolution=resolved_resolution,
-            aspect_ratio=resolved_aspect_ratio,
+            resolution=request.resolution,
+            aspect_ratio=request.aspect_ratio,
             quality=request.quality,
-            size=request.size if resolved_resolution is None else None,
+            size=request.size,
         )
         return _make_response(img_bytes, revised_prompt, request.response_format)
     except ValueError as e:
@@ -172,16 +138,14 @@ async def openai_edit(
     if model is None:
         model = os.getenv("DEFAULT_MODEL", "black-forest-labs/FLUX.1-schnell")
 
-    resolved_resolution, resolved_aspect_ratio, w, h = _resolve_size_params(size, resolution, aspect_ratio)
-
     try:
         img_bytes, revised_prompt = await edit_image(
             model=model,
             prompt=prompt,
             image_b64=image_b64,
-            size=size if resolved_resolution is None else None,
-            resolution=resolved_resolution,
-            aspect_ratio=resolved_aspect_ratio,
+            size=size,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
         )
         return _make_response(img_bytes, revised_prompt, response_format)
 
