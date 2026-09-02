@@ -5,9 +5,10 @@ import logging
 import os
 from typing import Annotated, Optional
 
+
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from PIL import Image, UnidentifiedImageError, DecompressionBombError
+from PIL import Image, UnidentifiedImageError
 from app.config import (
     DEFAULT_STEPS,
     DEFAULT_GUIDANCE,
@@ -20,10 +21,13 @@ from app.config import (
 )
 from app.service import generate_image, edit_image, save_image_bytes
 
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1")
 
+
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+
 
 
 def _make_response(
@@ -50,6 +54,7 @@ def _make_response(
     )
 
 
+
 def _to_data_url(raw: bytes, mime: str | None) -> str:
     """Convert raw image bytes to a data URL.
     :param raw: The raw image bytes.
@@ -62,6 +67,7 @@ def _to_data_url(raw: bytes, mime: str | None) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+
 def _normalize_image(raw: bytes) -> tuple[bytes, str]:
     """Re-encode any uploaded image to PNG so unsupported formats
     (BMP, TIFF, HEIC, ICO, GIF, ...) never reach the cloud provider as-is.
@@ -71,14 +77,19 @@ def _normalize_image(raw: bytes) -> tuple[bytes, str]:
         img.load()
     except UnidentifiedImageError:
         raise HTTPException(400, "Uploaded file is not a valid image")
+    except Image.DecompressionBombError:
+        raise HTTPException(400, "Uploaded image exceeds maximum allowed pixel dimensions")
+
 
     if img.mode not in ("RGB", "RGBA"):
         has_alpha = img.mode in ("P", "LA", "PA") and "transparency" in img.info
         img = img.convert("RGBA" if has_alpha else "RGB")
 
+
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue(), "image/png"
+
 
 
 @router.post("/images/generations", response_model=ImageGenerationResponse)
@@ -105,10 +116,12 @@ async def openai_generate(request: ImageGenerationRequest):
         f"prompt={request.prompt[:80]!r}"
     )
 
+
     if request.n != 1:
         raise HTTPException(400, "Only n=1 is supported")
     if request.response_format not in ("b64_json", "url"):
         raise HTTPException(400, "response_format must be 'b64_json' or 'url'")
+
 
     try:
         img_bytes, revised_prompt = await generate_image(
@@ -128,6 +141,7 @@ async def openai_generate(request: ImageGenerationRequest):
     except Exception as e:
         logger.exception("Generation error")
         raise HTTPException(500, "Image generation failed")
+
 
 
 @router.post("/images/edits", response_model=ImageGenerationResponse)
@@ -170,10 +184,12 @@ async def openai_edit(
     """
     upload = image or image_single
 
+
     logger.info(
         f"Edit: model={model!r}, size={size!r}, resolution={resolution!r}, "
         f"prompt={prompt[:80]!r}, upload={'yes' if upload else 'None'}"
     )
+
 
     if n != 1:
         raise HTTPException(400, "Only n=1 is supported")
@@ -181,6 +197,7 @@ async def openai_edit(
         raise HTTPException(400, "response_format must be 'b64_json' or 'url'")
     if upload is None:
         raise HTTPException(400, "Field 'image' or 'image[]' (file upload) is required for edits")
+
 
     raw = await upload.read()
     if not raw:
@@ -193,8 +210,10 @@ async def openai_edit(
     image_b64 = _to_data_url(raw, mime)
     logger.info(f"[edit] image read: {len(raw)} bytes, original_mime={original_mime!r}, normalized_mime={mime!r}")
 
+
     if model is None:
         model = os.getenv("DEFAULT_MODEL") or LOCAL_MODEL_ID
+
 
     try:
         img_bytes, revised_prompt = await edit_image(
@@ -206,6 +225,7 @@ async def openai_edit(
             aspect_ratio=aspect_ratio,
         )
         return _make_response(img_bytes, revised_prompt, response_format)
+
 
     except httpx.HTTPStatusError as e:
         status = e.response.status_code
@@ -224,3 +244,4 @@ async def openai_edit(
     except Exception as e:
         logger.exception("Edit error")
         raise HTTPException(500, "Image edit failed")
+    
