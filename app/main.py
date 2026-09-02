@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from app.routers.direct_image import router as direct_router
 from app.routers.openai_compat import router as openai_router
 from app.service import get_pipeline
-from app import openrouter_caps
+from app.providers import refresh_openrouter_caps
 
 os.environ["TORCHDYNAMO_DISABLE"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -32,8 +32,8 @@ async def lifespan(app: FastAPI):
 
     Base URL is read from OPENROUTER_BASE_URL env var (no hardcoded URL here).
     """
-    # base_url and api_key are resolved inside refresh_caps() from env vars
-    await openrouter_caps.refresh_caps()
+    # base_url and api_key are resolved inside refresh_openrouter_caps() from env vars
+    await refresh_openrouter_caps()
     if os.getenv("PRELOAD_MODEL", "0") == "1":
         get_pipeline()
     yield

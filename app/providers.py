@@ -7,11 +7,48 @@ import json
 import re
 import logging
 from dotenv import load_dotenv
-from app import openrouter_caps
+from app.config import OPENROUTER_MODEL_SIZES
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+_OPENROUTER_MODEL_SIZES = dict(OPENROUTER_MODEL_SIZES)
+
+def _clamp_openrouter_size(model: str, requested: str | None) -> str | None:
+    if requested is None: return None
+    allowed = _OPENROUTER_MODEL_SIZES.get(model)
+    if not allowed or requested in allowed: return requested
+    try: req_w, req_h = map(int, requested.split("x"))
+    except ValueError: return allowed[0]
+    for candidate in allowed:
+        try: c_w, c_h = map(int, candidate.split("x"))
+        except ValueError: continue
+        if ((req_w > req_h and c_w > c_h) or (req_h > req_w and c_h > c_w) or
+                (req_w == req_h and c_w == c_h)) and max(c_w, c_h) <= max(req_w, req_h):
+            return candidate
+    return "1024x1024" if "1024x1024" in allowed else allowed[-1]
+
+async def refresh_openrouter_caps(api_key: str | None = None, base_url: str | None = None,
+                                  timeout: float = 15.0) -> None:
+    key = api_key or os.getenv("OPENROUTER_API_KEY", "")
+    resolved_base = (base_url or os.getenv("OPENROUTER_BASE_URL", "")).rstrip("/")
+    if not key or not resolved_base: return
+    url = f"{resolved_base}/api/v1/images/models"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, headers={"Authorization": f"Bearer {key}"})
+            response.raise_for_status()
+            payload = response.json()
+        entries = (payload.get("data") or payload.get("models") or []) if isinstance(payload, dict) else payload
+        for entry in entries if isinstance(entries, list) else []:
+            model_id = entry.get("id") or entry.get("model")
+            caps = entry.get("capabilities") or entry.get("parameters") or {}
+            sizes = caps.get("sizes") or caps.get("supported_sizes") or entry.get("sizes") or []
+            if model_id and sizes:
+                _OPENROUTER_MODEL_SIZES[model_id] = sorted(sizes, key=lambda s: max(map(int, s.split("x"))), reverse=True)
+    except Exception as exc:
+        logger.warning(f"openrouter_caps: failed to fetch {url}: {exc} — using fallback sizes")
 
 
 class BaseProvider(ABC):
@@ -272,9 +309,9 @@ class OpenRouterProvider(CloudProvider):
     ) -> dict:
         payload = {}
         if size:
-            payload["size"] = openrouter_caps.clamp_size(model, size)
+            payload["size"] = _clamp_openrouter_size(model, size)
         elif width and height:
-            payload["size"] = openrouter_caps.clamp_size(model, f"{width}x{height}")
+            payload["size"] = _clamp_openrouter_size(model, f"{width}x{height}")
         elif resolution:
             payload["resolution"] = resolution
             if aspect_ratio:

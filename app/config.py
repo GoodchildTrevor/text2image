@@ -17,6 +17,16 @@ MAX_IMAGE_PIXELS: int = int(os.getenv("MAX_IMAGE_PIXELS", "25_000_000"))
 DEFAULT_MAX_STORED_IMAGES: int = int(os.getenv("MAX_STORED_IMAGES", "500"))
 MAX_EDIT_IMAGES: int = int(os.getenv("MAX_EDIT_IMAGES", "10"))
 
+OPENROUTER_MODEL_SIZES: dict[str, list[str]] = {
+    "openai/gpt-image-1": ["1536x1024", "1024x1536", "1024x1024"],
+    "openai/gpt-5-image": ["1792x1024", "1024x1792", "1024x1024"],
+    "openai/gpt-5-image-mini": ["1792x1024", "1024x1792", "1024x1024"],
+    "openai/gpt-5.4-image-2": ["1792x1024", "1024x1792", "1024x1024"],
+    "google/gemini-3.1-flash-image-preview": ["1024x1024"],
+    "google/gemini-3-pro-image-preview": ["1024x1024"],
+    "google/gemini-2.5-flash-image": ["1024x1024"],
+}
+
 
 class TextToImageRequest(BaseModel):
     """Request model for the legacy POST /generate endpoint."""
