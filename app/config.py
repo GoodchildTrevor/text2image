@@ -15,6 +15,7 @@ MAX_UPLOAD_BYTES: int = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024))
 MAX_IMAGE_PIXELS: int = int(os.getenv("MAX_IMAGE_PIXELS", "25_000_000"))
 
 DEFAULT_MAX_STORED_IMAGES: int = int(os.getenv("MAX_STORED_IMAGES", "500"))
+MAX_EDIT_IMAGES: int = int(os.getenv("MAX_EDIT_IMAGES", "10"))
 
 
 class TextToImageRequest(BaseModel):

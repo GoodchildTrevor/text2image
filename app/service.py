@@ -57,10 +57,17 @@ def save_image_bytes(img_bytes: bytes) -> str:
     :param img_bytes: Raw PNG image bytes.
     :returns: Public URL like ``https://owui.aeonflask.ru/images/abc123.png``.
     """
+    if not PUBLIC_BASE_URL:
+        logger.warning(
+            "IMGEN_PUBLIC_URL is empty - generated image URLs will be relative "
+            "and likely broken for external clients"
+        )
     fname = f"{uuid.uuid4().hex}.png"
     (IMAGES_DIR / fname).write_bytes(img_bytes)
     _enforce_retention(IMAGES_DIR, DEFAULT_MAX_STORED_IMAGES)
-    return f"{PUBLIC_BASE_URL}/images/{fname}"
+    url = f"{PUBLIC_BASE_URL}/images/{fname}"
+    logger.info("save_image_bytes: wrote %s (%d bytes) -> %s", fname, len(img_bytes), url)
+    return url
 
 
 @lru_cache(maxsize=1)
@@ -224,7 +231,7 @@ async def generate_image(
 async def edit_image(
     model: str,
     prompt: str,
-    image_b64: str,
+    images: list[str] | None = None,
     size: Optional[str] = None,
     resolution: str | None = None,
     aspect_ratio: str | None = None,
@@ -240,7 +247,7 @@ async def edit_image(
 
     :param model: The model identifier to look up in the provider registry.
     :param prompt: The text prompt describing the desired edit.
-    :param image_b64: Base64-encoded input image.
+    :param images: Base64-encoded input images.
     :param size: Optional size string (e.g. ``"1024x1024"`` or resolution tier).
     :param resolution: OpenRouter resolution tier.
     :param aspect_ratio: OpenRouter aspect ratio string.
@@ -248,11 +255,16 @@ async def edit_image(
     :raises ValueError: If ``model`` is unknown, does not support editing,
         or if ``size``/``resolution``/``aspect_ratio`` fail validation.
     """
+    # Keep compatibility with callers using the former scalar keyword.
+    if images is None and "image_b64" in kwargs:
+        images = [kwargs.pop("image_b64")]
     if model not in PROVIDERS:
         raise ValueError(f"Unknown model '{model}'")
     provider = PROVIDERS[model]
     if provider is None:
         raise ValueError(f"Model '{model}' does not support image editing")
+    if not images:
+        raise ValueError("At least one image is required for editing")
 
     resolution, aspect_ratio, _, _ = resolve_and_validate_size(
         size=size, resolution=resolution, aspect_ratio=aspect_ratio
@@ -262,7 +274,7 @@ async def edit_image(
     return await provider.edit(
         model=model,
         prompt=prompt,
-        image_b64=image_b64,
+        images=images,
         size=forwarded_size,
         resolution=resolution,
         aspect_ratio=aspect_ratio,

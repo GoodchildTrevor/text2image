@@ -7,13 +7,14 @@ from typing import Annotated, Optional
 
 
 import httpx
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from PIL import Image, UnidentifiedImageError
 from app.config import (
     DEFAULT_STEPS,
     DEFAULT_GUIDANCE,
     LOCAL_MODEL_ID,
     MAX_UPLOAD_BYTES,
+    MAX_EDIT_IMAGES,
     MAX_IMAGE_PIXELS,
     ImageGenerationRequest,
     ImageGenerationResponse,
@@ -91,6 +92,22 @@ def _normalize_image(raw: bytes) -> tuple[bytes, str]:
     return buf.getvalue(), "image/png"
 
 
+def _require_multipart(request: Request) -> None:
+    """Reject non-multipart requests to the file-upload endpoint with 415.
+
+    FastAPI validates required ``Form()``/``File()`` fields before the endpoint
+    body runs, so checking the header as a dependency provides a clear error
+    instead of a misleading missing-field 422 for JSON requests.
+    """
+    content_type = request.headers.get("content-type", "")
+    if not content_type.lower().startswith("multipart/form-data"):
+        raise HTTPException(
+            415,
+            "Expected 'multipart/form-data' with a file upload for 'image'/'image[]'. "
+            "This endpoint does not accept application/json.",
+        )
+
+
 
 @router.post("/images/generations", response_model=ImageGenerationResponse)
 async def openai_generate(request: ImageGenerationRequest):
@@ -144,12 +161,16 @@ async def openai_generate(request: ImageGenerationRequest):
 
 
 
-@router.post("/images/edits", response_model=ImageGenerationResponse)
+@router.post(
+    "/images/edits",
+    response_model=ImageGenerationResponse,
+    dependencies=[Depends(_require_multipart)],
+)
 async def openai_edit(
     prompt: Annotated[str, Form()],
     # OpenWebUI sends a single image as 'image[]' (array notation), standard clients use 'image'
-    image: Annotated[Optional[UploadFile], File(alias="image[]")] = None,
-    image_single: Annotated[Optional[UploadFile], File(alias="image")] = None,
+    image: Annotated[Optional[list[UploadFile]], File(alias="image[]")] = None,
+    image_single: Annotated[Optional[list[UploadFile]], File(alias="image")] = None,
     model: Annotated[Optional[str], Form()] = None,
     n: Annotated[int, Form()] = 1,
     size: Annotated[Optional[str], Form()] = None,
@@ -182,12 +203,12 @@ async def openai_edit(
     :raises httpx.ClientError: If the request is invalid.
     :raises httpx.ServerError: If the request is invalid.
     """
-    upload = image or image_single
+    uploads = image or image_single or []
 
 
     logger.info(
         f"Edit: model={model!r}, size={size!r}, resolution={resolution!r}, "
-        f"prompt={prompt[:80]!r}, upload={'yes' if upload else 'None'}"
+        f"prompt={prompt[:80]!r}, num_images={len(uploads)}"
     )
 
 
@@ -195,20 +216,23 @@ async def openai_edit(
         raise HTTPException(400, "Only n=1 is supported")
     if response_format not in ("b64_json", "url"):
         raise HTTPException(400, "response_format must be 'b64_json' or 'url'")
-    if upload is None:
+    if not uploads:
         raise HTTPException(400, "Field 'image' or 'image[]' (file upload) is required for edits")
+    if len(uploads) > MAX_EDIT_IMAGES:
+        raise HTTPException(400, f"Too many images: {len(uploads)}. Maximum is {MAX_EDIT_IMAGES}.")
 
-
-    raw = await upload.read()
-    if not raw:
-        raise HTTPException(400, "Uploaded image file is empty")
-    if len(raw) > MAX_UPLOAD_BYTES:
-        logger.warning(f"Edit upload too large: {len(raw)} bytes (max={MAX_UPLOAD_BYTES})")
-        raise HTTPException(413, f"Upload exceeds maximum size of {MAX_UPLOAD_BYTES} bytes ({MAX_UPLOAD_BYTES // 1024 // 1024} MiB)")
-    original_mime = upload.content_type
-    raw, mime = _normalize_image(raw)
-    image_b64 = _to_data_url(raw, mime)
-    logger.info(f"[edit] image read: {len(raw)} bytes, original_mime={original_mime!r}, normalized_mime={mime!r}")
+    images_b64 = []
+    for upload in uploads:
+        raw = await upload.read()
+        if not raw:
+            raise HTTPException(400, "Uploaded image file is empty")
+        if len(raw) > MAX_UPLOAD_BYTES:
+            logger.warning(f"Edit upload too large: {len(raw)} bytes (max={MAX_UPLOAD_BYTES})")
+            raise HTTPException(413, f"Upload exceeds maximum size of {MAX_UPLOAD_BYTES} bytes ({MAX_UPLOAD_BYTES // 1024 // 1024} MiB)")
+        original_mime = upload.content_type
+        raw, mime = _normalize_image(raw)
+        images_b64.append(_to_data_url(raw, mime))
+        logger.info(f"[edit] image read: {len(raw)} bytes, original_mime={original_mime!r}, normalized_mime={mime!r}")
 
 
     if model is None:
@@ -219,7 +243,7 @@ async def openai_edit(
         img_bytes, revised_prompt = await edit_image(
             model=model,
             prompt=prompt,
-            image_b64=image_b64,
+            images=images_b64,
             size=size,
             resolution=resolution,
             aspect_ratio=aspect_ratio,

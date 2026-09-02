@@ -26,12 +26,12 @@ class BaseProvider(ABC):
         """
 
     @abstractmethod
-    async def edit(self, model: str, prompt: str, image_b64: str, **kwargs) -> tuple[bytes, str]:
+    async def edit(self, model: str, prompt: str, images: list[str], **kwargs) -> tuple[bytes, str]:
         """Edit an existing image using a text instruction.
 
         :param model: Model identifier string used by the provider.
         :param prompt: Text instruction describing how to edit the image.
-        :param image_b64: Base-64-encoded source image (may or may not include ``data:...`` prefix).
+        :param images: Base-64-encoded source images.
         :returns: A ``(image_bytes, assistant_text)`` tuple — *assistant_text* is any
             accompanying message (caption, explanation), or empty string if none.
         """
@@ -87,7 +87,7 @@ class FallbackProvider(BaseProvider):
             )
             return await self.secondary.generate(model=model, prompt=prompt, **kwargs)
 
-    async def edit(self, model: str, prompt: str, image_b64: str, **kwargs) -> tuple[bytes, str]:
+    async def edit(self, model: str, prompt: str, images: list[str], **kwargs) -> tuple[bytes, str]:
         """Edit via ``primary``, falling back to ``secondary`` on any failure.
 
         :param model: Model identifier string used by the provider.
@@ -96,7 +96,7 @@ class FallbackProvider(BaseProvider):
         :returns: A ``(image_bytes, assistant_text)`` tuple from whichever provider succeeded.
         """
         try:
-            result = await self.primary.edit(model=model, prompt=prompt, image_b64=image_b64, **kwargs)
+            result = await self.primary.edit(model=model, prompt=prompt, images=images, **kwargs)
             logger.info(f"FallbackProvider.edit: primary OK for model={model!r}")
             return result
         except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException, ValueError) as e:
@@ -104,7 +104,7 @@ class FallbackProvider(BaseProvider):
                 f"FallbackProvider.edit: primary failed for model={model!r} "
                 f"({type(e).__name__}: {e}), switching to secondary"
             )
-            return await self.secondary.edit(model=model, prompt=prompt, image_b64=image_b64, **kwargs)
+            return await self.secondary.edit(model=model, prompt=prompt, images=images, **kwargs)
 
 
 class OpenAICompatProvider(CloudProvider):
@@ -179,7 +179,12 @@ class OpenAICompatProvider(CloudProvider):
             f"content preview: {str(content)[:100]}"
         )
 
-    async def _chat_completions(self, client: httpx.AsyncClient, model: str, messages: list) -> dict:
+    async def _chat_completions(
+        self,
+        client: httpx.AsyncClient,
+        model: str,
+        messages: list
+    ) -> dict:
         resp = await client.post(
             f"{self.base_url}/chat/completions",
             headers=self._auth_headers(),
@@ -205,7 +210,7 @@ class OpenAICompatProvider(CloudProvider):
             data = await self._chat_completions(client, model, [{"role": "user", "content": prompt}])
             return self._parse_response(data)
 
-    async def edit(self, model: str, prompt: str, image_b64: str, **kwargs) -> tuple[bytes, str]:
+    async def edit(self, model: str, prompt: str, images: list[str], **kwargs) -> tuple[bytes, str]:
         """Edit an existing image via chat/completions API.
 
         Note: ``resolution`` and ``aspect_ratio`` are accepted for signature symmetry with
@@ -218,14 +223,13 @@ class OpenAICompatProvider(CloudProvider):
         :returns: A tuple ``(image_bytes, assistant_text)`` where *assistant_text* is any
             accompanying message (e.g. a caption or explanation).
         """
-        if not image_b64.startswith("data:"):
-            image_b64 = f"data:image/png;base64,{image_b64}"
+        normalized_images = [img if img.startswith("data:") else f"data:image/png;base64,{img}" for img in images]
         async with httpx.AsyncClient(timeout=120) as client:
             messages = [{
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_b64}},
+                    *[{"type": "image_url", "image_url": {"url": img}} for img in normalized_images],
                 ],
             }]
             data = await self._chat_completions(client, model, messages)
@@ -319,18 +323,17 @@ class OpenRouterProvider(CloudProvider):
             return self._parse_image_response(resp.json())
 
     async def edit(
-        self, model: str, prompt: str, image_b64: str,
+        self, model: str, prompt: str, images: list[str],
         resolution: str | None = None, aspect_ratio: str | None = None,
         size: str | None = None, quality: str | None = None,
         n: int | None = None, **kwargs,
     ) -> tuple[bytes, str]:
-        if not image_b64.startswith("data:"):
-            image_b64 = f"data:image/png;base64,{image_b64}"
+        normalized_images = [img if img.startswith("data:") else f"data:image/png;base64,{img}" for img in images]
 
         payload: dict = {
             "model": model,
             "prompt": prompt,
-            "input_references": [{"type": "image_url", "image_url": {"url": image_b64}}],
+            "input_references": [{"type": "image_url", "image_url": {"url": img}} for img in normalized_images],
         }
         payload.update(self._build_size_payload(model, resolution, aspect_ratio, size, None, None))
         if quality:
