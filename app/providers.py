@@ -16,18 +16,44 @@ logger = logging.getLogger(__name__)
 
 class BaseProvider(ABC):
     @abstractmethod
-    async def generate(self, model: str, prompt: str, **kwargs) -> tuple[bytes, str]: ...
+    async def generate(self, model: str, prompt: str, **kwargs) -> tuple[bytes, str]:
+        """Generate an image from a text prompt.
+
+        :param model: Model identifier string used by the provider.
+        :param prompt: Text prompt describing the desired image.
+        :returns: A ``(image_bytes, assistant_text)`` tuple — *assistant_text* is any
+            accompanying message (caption, explanation), or empty string if none.
+        """
 
     @abstractmethod
-    async def edit(self, model: str, prompt: str, image_b64: str, **kwargs) -> tuple[bytes, str]: ...
+    async def edit(self, model: str, prompt: str, image_b64: str, **kwargs) -> tuple[bytes, str]:
+        """Edit an existing image using a text instruction.
+
+        :param model: Model identifier string used by the provider.
+        :param prompt: Text instruction describing how to edit the image.
+        :param image_b64: Base-64-encoded source image (may or may not include ``data:...`` prefix).
+        :returns: A ``(image_bytes, assistant_text)`` tuple — *assistant_text* is any
+            accompanying message (caption, explanation), or empty string if none.
+        """
 
 
 class CloudProvider(BaseProvider, ABC):
+    """Base for cloud-based providers that use bearer-token authentication."""
+
     def __init__(self, api_key: str, base_url: str):
+        """Initialize a cloud provider with API credentials.
+
+        :param api_key: Bearer token string used in ``Authorization`` headers.
+        :param base_url: Base URL of the image-generation endpoint (trailing slash stripped).
+        """
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
 
     def _auth_headers(self) -> dict:
+        """Return a dictionary with an ``Authorization`` header.
+
+        :returns: Dict containing ``{"Authorization": "Bearer <api_key>"}``.
+        """
         return {"Authorization": f"Bearer {self.api_key}"}
 
 
@@ -35,10 +61,21 @@ class FallbackProvider(BaseProvider):
     """Tries ``primary``, falls back to ``secondary`` on any HTTP/network error."""
 
     def __init__(self, primary: BaseProvider, secondary: BaseProvider):
+        """Initialize the fallback chain.
+
+        :param primary: Provider tried first on every request.
+        :param secondary: Fallback provider invoked when *primary* raises an HTTP/network error.
+        """
         self.primary = primary
         self.secondary = secondary
 
     async def generate(self, model: str, prompt: str, **kwargs) -> tuple[bytes, str]:
+        """Generate via ``primary``, falling back to ``secondary`` on any failure.
+
+        :param model: Model identifier string used by the provider.
+        :param prompt: Text prompt describing the desired image.
+        :returns: A ``(image_bytes, assistant_text)`` tuple from whichever provider succeeded.
+        """
         try:
             result = await self.primary.generate(model=model, prompt=prompt, **kwargs)
             logger.info(f"FallbackProvider.generate: primary OK for model={model!r}")
@@ -51,6 +88,13 @@ class FallbackProvider(BaseProvider):
             return await self.secondary.generate(model=model, prompt=prompt, **kwargs)
 
     async def edit(self, model: str, prompt: str, image_b64: str, **kwargs) -> tuple[bytes, str]:
+        """Edit via ``primary``, falling back to ``secondary`` on any failure.
+
+        :param model: Model identifier string used by the provider.
+        :param prompt: Text instruction describing how to edit the image.
+        :param image_b64: Base-64-encoded source image (may or may not include ``data:...`` prefix).
+        :returns: A ``(image_bytes, assistant_text)`` tuple from whichever provider succeeded.
+        """
         try:
             result = await self.primary.edit(model=model, prompt=prompt, image_b64=image_b64, **kwargs)
             logger.info(f"FallbackProvider.edit: primary OK for model={model!r}")
@@ -67,17 +111,35 @@ class OpenAICompatProvider(CloudProvider):
     """Image generation and editing via an OpenAI-compatible /chat/completions API."""
 
     def __init__(self, api_key: str = None, base_url: str = None):
+        """Initialize the provider from explicit args or environment variables.
+
+        :param api_key: Bearer token; falls back to ``API_KEY`` env var (defaults to empty string).
+        :param base_url: Endpoint URL; falls back to ``CLOUD_API_BASE_URL`` env var (defaults to empty string).
+        """
         super().__init__(
             api_key=api_key or os.getenv("API_KEY", ""),
             base_url=base_url or os.getenv("CLOUD_API_BASE_URL", ""),
         )
 
     def _parse_response(self, data: dict) -> tuple[bytes, str]:
-        message = data["choices"][0]["message"]
-        content = message.get("content")
-        parts = message.get("parts") or []
-        images = message.get("images") or []
+        """Extract an image from a chat/completions API response.
 
+        Searches the message for images in multiple formats (``message.images``, ``parts.inlineData``,
+        ``data:image/*;base64`` URIs). Raises :exc:`ValueError` if no embedded image is found or only HTTP URLs appear.
+
+        :param data: The JSON-decoded response dict from a /chat/completions call.
+        :returns: A ``(image_bytes, assistant_text)`` tuple — *assistant_text* comes from the message's text content (may be empty).
+        """
+        choices = (data or {}).get("choices") or []
+        if not choices:
+            raise ValueError(
+                "Empty response from provider — no 'choices' key found"
+            )
+
+        message = choices[0].get("message") or {}
+        content = message.get("content") if isinstance(message, dict) else None
+        parts = (message.get("parts") if isinstance(message, dict) else []) or []
+        images = (message.get("images") if isinstance(message, dict) else []) or []
         for img in images:
             url = (img.get("image_url") or {}).get("url", "")
             if url.startswith("data:image"):
@@ -128,22 +190,34 @@ class OpenAICompatProvider(CloudProvider):
         logger.info(f"cloud response: {json.dumps(data, ensure_ascii=False)[:500]}")
         return data
 
-    async def generate(
-        self, model: str, prompt: str,
-        width: int | None = None, height: int | None = None,
-        steps: int = None, guidance: float = None,
-        resolution: str | None = None, aspect_ratio: str | None = None,
-        **kwargs,
-    ) -> tuple[bytes, str]:
+    async def generate(self, model: str, prompt: str, **kwargs) -> tuple[bytes, str]:
+        """Generate an image via chat/completions API.
+
+        Note: ``width``, ``height``, ``steps``, ``guidance``, ``resolution`` and
+        ``aspect_ratio`` are accepted for signature symmetry with other providers but
+        are absorbed by ``**kwargs`` — the OpenAI-compatible /chat/completions endpoint
+        derives image dimensions from the prompt text.
+
+        :returns: A tuple ``(image_bytes, assistant_text)`` where *assistant_text* is any
+        accompanying message (e.g. a caption or explanation).
+        """
         async with httpx.AsyncClient(timeout=120) as client:
             data = await self._chat_completions(client, model, [{"role": "user", "content": prompt}])
             return self._parse_response(data)
 
-    async def edit(
-        self, model: str, prompt: str, image_b64: str,
-        resolution: str | None = None, aspect_ratio: str | None = None,
-        **kwargs,
-    ) -> tuple[bytes, str]:
+    async def edit(self, model: str, prompt: str, image_b64: str, **kwargs) -> tuple[bytes, str]:
+        """Edit an existing image via chat/completions API.
+
+        Note: ``resolution`` and ``aspect_ratio`` are accepted for signature symmetry with
+        other providers but are absorbed by ``**kwargs`` — the /chat/completions endpoint
+        derives dimensions from the prompt text.
+
+        :param model: Model identifier string used by the provider.
+        :param prompt: Text instruction describing how to edit the image.
+        :param image_b64: Base-64-encoded source image, optionally with a data URI prefix.
+        :returns: A tuple ``(image_bytes, assistant_text)`` where *assistant_text* is any
+            accompanying message (e.g. a caption or explanation).
+        """
         if not image_b64.startswith("data:"):
             image_b64 = f"data:image/png;base64,{image_b64}"
         async with httpx.AsyncClient(timeout=120) as client:
@@ -208,7 +282,6 @@ class OpenRouterProvider(CloudProvider):
     async def generate(
         self, model: str, prompt: str,
         width: int | None = None, height: int | None = None,
-        steps: int = None, guidance: float = None,
         resolution: str | None = None, aspect_ratio: str | None = None,
         size: str | None = None, quality: str | None = None,
         n: int | None = None, **kwargs,

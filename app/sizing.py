@@ -1,17 +1,17 @@
-"""Единая точка валидации и разрешения параметров размера изображения.
+"""Single point of validation and resolution for image-size parameters.
 
-Раньше логика была разбросана по:
+Previously this logic was scattered across:
   - app/routers/openai_compat.py  (VALID_RESOLUTIONS, VALID_SIZES, _resolve_size_params)
-  - app/providers.py              (_build_size_payload — потребитель уже готовых значений)
-  - app/service.py                (сигнатура/докстринг, без собственной валидации)
-  - app/pipe.py                   (свой dropdown значений aspect_ratio, без связи с сервером)
+  - app/providers.py              (_build_size_payload — consumer of already-resolved values)
+  - app/service.py                (signature/docstring, with no validation of its own)
+  - app/pipe.py                   (its own aspect_ratio value dropdown, not wired to the server)
 
-Теперь любой вызывающий код (роутеры, service.py, будущие эндпоинты) должен
-использовать resolve_and_validate_size(...) вместо копирования логики.
+Now any calling code (routers, service.py, future endpoints) should use
+resolve_and_validate_size(...) instead of duplicating the logic.
 
-Модуль не зависит от FastAPI: при ошибке кидает ValueError, а роутеры сами
-конвертируют это в HTTPException(400, ...) — как они уже делают для остальных
-ошибок валидации (см. direct_image.py, openai_compat.py).
+The module does not depend on FastAPI: on error it raises ValueError, and the
+routers themselves convert that into HTTPException(400, ...) — as they already
+do for the rest of the validation errors (see direct_image.py, openai_compat.py).
 """
 from __future__ import annotations
 
@@ -27,10 +27,6 @@ VALID_SIZES: set[str] = {
     if s.strip()
 }
 
-# Тот же набор, что в dropdown UserValves.ASPECT_RATIO в app/pipe.py.
-# pipe.py — отдельный standalone-файл для OpenWebUI Function и не может
-# импортировать app.sizing напрямую, поэтому список там дублируется намеренно.
-# При изменении этого сета — обновите dropdown в app/pipe.py вручную.
 VALID_ASPECT_RATIOS: set[str] = {
     "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9",
 }
@@ -44,7 +40,6 @@ class SizeParams:
     height: int | None
 
     def __iter__(self):
-        # Позволяет распаковку: resolution, aspect_ratio, width, height = resolve_and_validate_size(...)
         return iter((self.resolution, self.aspect_ratio, self.width, self.height))
 
 
@@ -53,14 +48,14 @@ def resolve_and_validate_size(
     resolution: str | None = None,
     aspect_ratio: str | None = None,
 ) -> SizeParams:
-    """Провалидировать и нормализовать size/resolution/aspect_ratio.
+    """Validate and normalize size/resolution/aspect_ratio.
 
-    :param size: Тир резолюции OpenRouter (например ``"1K"``) либо явный
-        ``WIDTHxHEIGHT`` из ``VALID_SIZES``.
-    :param resolution: Тир резолюции OpenRouter, должен быть в ``VALID_RESOLUTIONS``.
-    :param aspect_ratio: Соотношение сторон, должен быть в ``VALID_ASPECT_RATIOS``.
-    :raises ValueError: если любое значение не проходит валидацию.
-    :returns: SizeParams с разрешёнными (resolution, aspect_ratio, width, height).
+    :param size: An OpenRouter resolution tier (e.g. ``"1K"``) or an explicit
+        ``WIDTHxHEIGHT`` from ``VALID_SIZES``.
+    :param resolution: An OpenRouter resolution tier; must be in ``VALID_RESOLUTIONS``.
+    :param aspect_ratio: Aspect ratio; must be in ``VALID_ASPECT_RATIOS``.
+    :raises ValueError: if any value fails validation.
+    :returns: SizeParams with the resolved (resolution, aspect_ratio, width, height).
     """
     if aspect_ratio is not None and aspect_ratio not in VALID_ASPECT_RATIOS:
         raise ValueError(

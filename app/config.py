@@ -3,6 +3,20 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+# ── Application-wide constants (single source of truth) ───────────────
+
+DEFAULT_STEPS: int = int(os.getenv("FLUX_DEFAULT_STEPS", "4"))
+DEFAULT_GUIDANCE: float = float(os.getenv("FLUX_DEFAULT_GUIDANCE", "1.0"))
+LOCAL_MODEL_ID: str = os.getenv("LOCAL_MODEL", "black-forest-labs/FLUX.1-schnell")
+
+IMAGES_DIR_STR: str = "/app/static/images"
+
+MAX_UPLOAD_BYTES: int = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+MAX_IMAGE_PIXELS: int = int(os.getenv("MAX_IMAGE_PIXELS", "25_000_000"))
+
+DEFAULT_MAX_STORED_IMAGES: int = int(os.getenv("MAX_STORED_IMAGES", "500"))
+
+
 class TextToImageRequest(BaseModel):
     """Request model for the legacy POST /generate endpoint."""
     model: str = Field(

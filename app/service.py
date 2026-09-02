@@ -12,6 +12,7 @@ import logging
 from typing import Optional
 
 from app.providers import PROVIDERS
+from app.config import DEFAULT_MAX_STORED_IMAGES
 from app.sizing import resolve_and_validate_size
 
 logger = logging.getLogger(__name__)
@@ -24,18 +25,30 @@ _LOCAL_DEFAULT_GUIDANCE = float(os.getenv("FLUX_DEFAULT_GUIDANCE", "1.0"))
 
 IMAGES_DIR = pathlib.Path("/app/static/images")
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-
-# Public base URL for serving static images
-# e.g. "https://owui.aeonflask.ru" — images will be at {PUBLIC_BASE_URL}/images/{fname}
 PUBLIC_BASE_URL = os.getenv("IMGEN_PUBLIC_URL", "http://imgen:8010")
 
-# Mapping from OpenRouter resolution tier to pixel dimensions for local pipeline
 _RESOLUTION_TO_PIXELS: dict[str, tuple[int, int]] = {
     "512": (512, 512),
     "1K":  (1024, 1024),
     "2K":  (2048, 2048),
     "4K":  (4096, 4096),
 }
+
+
+def _enforce_retention(directory: pathlib.Path, max_images: int) -> None:
+    """Remove oldest generated PNGs beyond the configured retention limit."""
+    if max_images < 1:
+        return
+    files = sorted(
+        (f for f in directory.iterdir() if f.is_file() and f.suffix.lower() == ".png"),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    for old_file in files[max_images:]:
+        try:
+            old_file.unlink()
+        except OSError:
+            logger.warning("Could not remove retained image %s", old_file)
 
 
 def save_image_bytes(img_bytes: bytes) -> str:
@@ -46,6 +59,7 @@ def save_image_bytes(img_bytes: bytes) -> str:
     """
     fname = f"{uuid.uuid4().hex}.png"
     (IMAGES_DIR / fname).write_bytes(img_bytes)
+    _enforce_retention(IMAGES_DIR, DEFAULT_MAX_STORED_IMAGES)
     return f"{PUBLIC_BASE_URL}/images/{fname}"
 
 
@@ -100,14 +114,17 @@ async def run_inference(
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         start = time.perf_counter()
-        with torch.no_grad():
-            output = pipe(
-                prompt=prompt,
-                height=height,
-                width=width,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-            )
+        def _sync_pipe():
+            with torch.no_grad():
+                return pipe(
+                    prompt=prompt,
+                    height=height,
+                    width=width,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                )
+
+        output = await asyncio.to_thread(_sync_pipe)
         elapsed = time.perf_counter() - start
         peak_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
         logger.info(f"Inference: {elapsed:.2f}s | Peak VRAM: {peak_gb:.2f} GB")
@@ -167,9 +184,7 @@ async def generate_image(
     resolution, aspect_ratio, size_width, size_height = resolve_and_validate_size(
         size=size, resolution=resolution, aspect_ratio=aspect_ratio
     )
-    # Forward the raw `size` string to cloud providers only when it wasn't
-    # consumed as a resolution tier — mirrors OpenRouterProvider's
-    # `_build_size_payload` priority of size > width/height > resolution.
+
     forwarded_size = None if resolution is not None else size
 
     if provider is None:
